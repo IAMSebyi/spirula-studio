@@ -492,8 +492,8 @@ inline bool BeginCombo(const Msg& m, const char* preview, ImGuiComboFlags flags 
     const char* l = detail::label(m);
     return detail::named_combo(l, [&] { return ImGui::BeginCombo(l, preview, flags); });
 }
-inline bool BeginComboRaw(const char* id, const char* preview) {
-    return ImGui::BeginCombo(id, preview);
+inline bool BeginComboRaw(const char* id, const char* preview, ImGuiComboFlags flags = 0) {
+    return ImGui::BeginCombo(id, preview, flags);
 }
 
 inline bool SliderInt(const Msg& m, int* v, int lo, int hi) {
