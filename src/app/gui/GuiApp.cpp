@@ -11111,8 +11111,16 @@ void GuiApp::draw_status_strip() {
                         msg::status_preparing);
         ui::TextDisabledRaw(" ");
     } else if (ph == TrainRunner::Phase::Evaluating) {
-        ui::ProgressBar(-(float)ImGui::GetTime(), ImVec2(-8, 0),
-                        msg::status_evaluating);
+        const spirula::EvalProgress p = _runner.latest_eval_progress();
+        if (p.total > 0) {
+            const float frac = std::clamp((float)p.completed / (float)p.total,
+                                          0.0f, 1.0f);
+            ui::ProgressBar(frac, ImVec2(-8, 0), msg::status_eval_views,
+                            {p.completed, p.total, (int)(frac * 100.0f)});
+        } else {
+            ui::ProgressBar(-(float)ImGui::GetTime(), ImVec2(-8, 0),
+                            msg::status_evaluating);
+        }
         ui::TextDisabledRaw(" ");
     } else if (ph == TrainRunner::Phase::Ready) {
         ui::ProgressBar(0.0f, ImVec2(-8, 0), msg::status_ready);
