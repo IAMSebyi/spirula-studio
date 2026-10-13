@@ -45,6 +45,7 @@ struct Buffer {
     size_t numel() const { return bytes.size() / elem_size(); }
     const float*   f32() const { return (const float*)bytes.data(); }
     const int32_t* i32() const { return (const int32_t*)bytes.data(); }
+    const uint32_t* u32() const { return (const uint32_t*)bytes.data(); }
     const uint8_t* u8()  const { return (const uint8_t*)bytes.data(); }
 };
 
@@ -61,6 +62,9 @@ Buffer from_floats(const std::vector<float>& v) {
 }
 Buffer from_bytes(const std::vector<uint8_t>& v) {
     return make_buffer("|u1", v.data(), v.size());
+}
+Buffer from_u32(const std::vector<uint32_t>& v) {
+    return make_buffer("<u4", v.data(), v.size() * sizeof(uint32_t));
 }
 
 std::map<std::string, Buffer> read_tar_npy(const fs::path& ckpt_dir) {
@@ -241,6 +245,7 @@ struct SlotClass {
     int  bits    = 0;
     bool fpbo    = false;
     bool is_int  = false;  // plain buffer holds int32, not float
+    bool is_uint = false;  // plain buffer holds uint32, not float
 };
 
 bool starts_with(const std::string& s, const char* p) {
@@ -265,6 +270,9 @@ std::optional<SlotClass> classify(const std::string& name) {
     if (name == "eng.accum_buffer") { SlotClass c; c.ch = 2; return c; }
     if (name == "eng.bias_correction_steps") {
         SlotClass c; c.ch = 1; c.is_int = true; return c;
+    }
+    if (name == "eng.visit_counters") {
+        SlotClass c; c.ch = 1; c.is_uint = true; return c;
     }
     // Quantized Adam moments, FPBO (means/quats/scales/opacities/features_dc).
     if (ends_with(name, "_qfpbo") && starts_with(name, "eng.")) {
@@ -338,6 +346,15 @@ std::vector<float> gather_rows(const float* src, int ch,
     std::vector<float> out((size_t)(max_new * ch), 0.0f);
     for (size_t k = 0; k < keep.size(); k++)
         std::memcpy(&out[k * ch], &src[keep[k] * ch], (size_t)ch * sizeof(float));
+    return out;
+}
+
+std::vector<uint32_t> gather_u32_rows(const uint32_t* src, int ch,
+                                       const std::vector<int64_t>& keep,
+                                       int64_t max_new) {
+    std::vector<uint32_t> out((size_t)(max_new * ch), 0);
+    for (size_t k = 0; k < keep.size(); k++)
+        std::memcpy(&out[k * ch], &src[keep[k] * ch], (size_t)ch * sizeof(uint32_t));
     return out;
 }
 
@@ -529,6 +546,9 @@ bool adapt_checkpoint(const fs::path& ckpt_dir, const TargetLayout& t,
                     out[k] = src[keep[k]];
                 emit[base] = make_buffer("<i4", out.data(),
                                          out.size() * sizeof(int32_t));
+            } else if (cls->is_uint) {
+                emit[base] = from_u32(gather_u32_rows(parts.plain->u32(), cls->ch,
+                                                       keep, max_new));
             } else if (cls->is_sh) {
                 emit[base] = from_floats(resample_sh(parts.plain->f32(), K_ck,
                                                      keep, K_new, max_new));
