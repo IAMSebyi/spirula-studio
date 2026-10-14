@@ -557,6 +557,11 @@ and recovers a scale 0.2 % away. The east and north residuals were the same to
 collinearity gate: a turn about the vertical is resisted by the whole in-plane
 radius, so a street walked end to end — which `full` refuses — fits.
 
+When a `full` DJI telemetry fit has a measured IMU up and more than one capture,
+each capture receives a zero-mean GPS altitude correction. This keeps a clip's
+barometric datum from becoming a model tilt; the orient log prints every value
+subtracted from the capture's stated altitude.
+
 The fit is refused rather than approximated, and **what refuses it is geometry,
 not a noise model**. Fewer than three positioned cameras, reference positions
 that do not spread wider than the inlier radius, under half the cameras inlying,

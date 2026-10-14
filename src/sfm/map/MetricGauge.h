@@ -41,6 +41,9 @@ struct MetricRef {
     std::vector<Vec3> centres;
     std::vector<Vec3> targets;
     std::vector<uint32_t> image_ids;
+    // A telemetry capture for every pair, or -1 where no identity exists.
+    // A full GPS fit may remove one barometric altitude constant per capture.
+    std::vector<int> tracks;
 };
 
 enum class MetricFail { None, Pairs, Distinct, Spread, Inliers, Collinear, Tilted };
@@ -49,6 +52,8 @@ enum class MetricFail { None, Pairs, Distinct, Spread, Inliers, Collinear, Tilte
 // level pair and takes the tilt from the caller's own up axis: a GPS altitude
 // biased by metres tips a full fit by degrees over a 100 m capture (D75).
 enum class MetricAxes { Full, Horizontal };
+
+enum class MetricTrackOffsets { None, Vertical };
 
 struct MetricFit {
     bool ok = false;
@@ -73,6 +78,16 @@ struct MetricFit {
     double scale_3d = 0;
     double vertical_sigma = 0;
     std::vector<char> inlier_mask;
+    // The amount subtracted from a track's stated ENU altitude before the
+    // fit. The weighted mean is zero; the global Z translation owns the datum.
+    std::vector<int> track_ids;
+    std::vector<double> track_vertical_offsets;
+
+    double trackVerticalOffset(int track) const {
+        for (size_t i = 0; i < track_ids.size() && i < track_vertical_offsets.size(); i++)
+            if (track_ids[i] == track) return track_vertical_offsets[i];
+        return 0.0;
+    }
 };
 
 // Orientation error grows as 1/perp_frac against scale error, so 0.05 refuses
@@ -189,9 +204,9 @@ inline bool estimateSim3Yaw(const std::vector<Vec3>& src, const std::vector<Vec3
 // The similarity taking `ref.centres` onto `ref.targets`, refused with a named reason when
 // the data cannot support one. `max_error` > 0 fixes the inlier radius (or `max_error_frac`
 // of the spread, if larger); 0 takes it from the references' own scatter about the fit.
-inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
-                                MetricAxes axes = MetricAxes::Full,
-                                double max_error_frac = 0.0) {
+inline MetricFit fitMetricGaugeRaw(const MetricRef& ref, double max_error,
+                                   MetricAxes axes = MetricAxes::Full,
+                                   double max_error_frac = 0.0) {
     MetricFit out;
     out.max_error = max_error;
     const bool flat = axes == MetricAxes::Horizontal;
@@ -383,6 +398,63 @@ inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
     out.ok = true;
     out.reason = MetricFail::None;
     return out;
+}
+
+// A new recording can start a new barometric datum. The zero-mean constraint
+// leaves the absolute ENU height to the similarity's translation.
+inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
+                                MetricAxes axes = MetricAxes::Full,
+                                double max_error_frac = 0.0,
+                                MetricTrackOffsets offsets = MetricTrackOffsets::None) {
+    if (offsets != MetricTrackOffsets::Vertical || ref.tracks.size() != ref.centres.size())
+        return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+
+    std::map<int, int> offered;
+    for (int track : ref.tracks)
+        if (track >= 0) offered[track]++;
+    std::vector<int> tracks;
+    for (const auto& kv : offered)
+        if (kv.second >= 3) tracks.push_back(kv.first);
+    if (tracks.size() < 2) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+
+    std::map<int, size_t> slot;
+    for (size_t i = 0; i < tracks.size(); i++) slot.emplace(tracks[i], i);
+    // This mode is entered only after a measured up has levelled the centres.
+    // The horizontal seed cannot trade a track's barometric step for a tilt.
+    MetricFit fit = fitMetricGaugeRaw(ref, max_error, MetricAxes::Horizontal, max_error_frac);
+    if (!fit.ok) return fit;
+
+    double mean_z = 0.0;
+    for (size_t i = 0; i < ref.centres.size(); i++)
+        mean_z += ref.targets[i].z - transformPoint(fit.T, ref.centres[i]).z;
+    // A level fit stores the median height to survive sea-level fixes; track
+    // offsets use the mean so their zero point stays the global translation.
+    fit.T.t.z += mean_z / (double)ref.centres.size();
+
+    std::vector<std::vector<double>> residuals(tracks.size());
+    for (size_t i = 0; i < ref.centres.size(); i++) {
+        const auto it = slot.find(ref.tracks[i]);
+        if (it != slot.end())
+            residuals[it->second].push_back(
+                ref.targets[i].z - transformPoint(fit.T, ref.centres[i]).z);
+    }
+    std::vector<double> dz(tracks.size(), 0.0);
+    int n = 0;
+    for (size_t k = 0; k < dz.size(); k++) {
+        const int count = (int)residuals[k].size();
+        if (count < 3) continue;
+        dz[k] = detail::medianOf(std::move(residuals[k]));
+        n += count;
+    }
+    if (n == 0) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    double datum = 0.0;
+    for (size_t k = 0; k < dz.size(); k++) datum += dz[k] * (double)offered[tracks[k]];
+    datum /= (double)n;
+    for (double& z : dz) z -= datum;
+
+    fit.track_ids = std::move(tracks);
+    fit.track_vertical_offsets = std::move(dz);
+    return fit;
 }
 
 // What pairing found, so a run can say why it has fewer cameras than either
