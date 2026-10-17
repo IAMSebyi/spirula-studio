@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -400,8 +401,9 @@ inline MetricFit fitMetricGaugeRaw(const MetricRef& ref, double max_error,
     return out;
 }
 
-// A new recording can start a new barometric datum. The zero-mean constraint
-// leaves the absolute ENU height to the similarity's translation.
+// A new recording can start a new barometric datum. With the centres levelled by a
+// measured up, a level seed reads each track's step (a median, so fixes stated at sea
+// level do not move it); the requested fit then runs on the corrected targets.
 inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
                                 MetricAxes axes = MetricAxes::Full,
                                 double max_error_frac = 0.0,
@@ -412,46 +414,39 @@ inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
     std::map<int, int> offered;
     for (int track : ref.tracks)
         if (track >= 0) offered[track]++;
-    std::vector<int> tracks;
-    for (const auto& kv : offered)
-        if (kv.second >= 3) tracks.push_back(kv.first);
-    if (tracks.size() < 2) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    if (std::count_if(offered.begin(), offered.end(), [](const auto& kv) { return kv.second >= 3; }) < 2)
+        return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
 
-    std::map<int, size_t> slot;
-    for (size_t i = 0; i < tracks.size(); i++) slot.emplace(tracks[i], i);
-    // This mode is entered only after a measured up has levelled the centres.
-    // The horizontal seed cannot trade a track's barometric step for a tilt.
-    MetricFit fit = fitMetricGaugeRaw(ref, max_error, MetricAxes::Horizontal, max_error_frac);
-    if (!fit.ok) return fit;
-
-    double mean_z = 0.0;
+    // A full seed would trade a track's barometric step for a tilt.
+    const MetricFit seed = fitMetricGaugeRaw(ref, max_error, MetricAxes::Horizontal, max_error_frac);
+    if (!seed.ok) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    std::map<int, std::vector<double>> residuals;
     for (size_t i = 0; i < ref.centres.size(); i++)
-        mean_z += ref.targets[i].z - transformPoint(fit.T, ref.centres[i]).z;
-    // A level fit stores the median height to survive sea-level fixes; track
-    // offsets use the mean so their zero point stays the global translation.
-    fit.T.t.z += mean_z / (double)ref.centres.size();
-
-    std::vector<std::vector<double>> residuals(tracks.size());
-    for (size_t i = 0; i < ref.centres.size(); i++) {
-        const auto it = slot.find(ref.tracks[i]);
-        if (it != slot.end())
-            residuals[it->second].push_back(
-                ref.targets[i].z - transformPoint(fit.T, ref.centres[i]).z);
-    }
-    std::vector<double> dz(tracks.size(), 0.0);
+        if (ref.tracks[i] >= 0 && seed.inlier_mask[i])
+            residuals[ref.tracks[i]].push_back(ref.targets[i].z -
+                                               transformPoint(seed.T, ref.centres[i]).z);
+    std::vector<int> tracks;
+    std::vector<double> dz;
+    double datum = 0.0;
     int n = 0;
-    for (size_t k = 0; k < dz.size(); k++) {
-        const int count = (int)residuals[k].size();
+    for (auto& kv : residuals) {
+        const int count = (int)kv.second.size();
         if (count < 3) continue;
-        dz[k] = detail::medianOf(std::move(residuals[k]));
+        tracks.push_back(kv.first);
+        dz.push_back(detail::medianOf(std::move(kv.second)));
+        datum += dz.back() * count;
         n += count;
     }
-    if (n == 0) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
-    double datum = 0.0;
-    for (size_t k = 0; k < dz.size(); k++) datum += dz[k] * (double)offered[tracks[k]];
-    datum /= (double)n;
-    for (double& z : dz) z -= datum;
+    if (tracks.size() < 2) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    // Zero mean over the frames: the fit's translation owns the datum.
+    for (double& z : dz) z -= datum / n;
 
+    MetricRef corrected = ref;
+    for (size_t i = 0; i < corrected.targets.size(); i++)
+        for (size_t k = 0; k < tracks.size(); k++)
+            if (corrected.tracks[i] == tracks[k]) corrected.targets[i].z -= dz[k];
+    MetricFit fit = fitMetricGaugeRaw(corrected, max_error, axes, max_error_frac);
+    if (!fit.ok) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
     fit.track_ids = std::move(tracks);
     fit.track_vertical_offsets = std::move(dz);
     return fit;

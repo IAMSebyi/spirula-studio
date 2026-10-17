@@ -116,6 +116,17 @@ int cmdMetricSelftest(int, char**) {
                   std::fabs(fit.trackVerticalOffset(2) - (raw[2] - mean)) < 1e-8,
               "T1a track altitude: corrections recover relative datums");
         check(fit.rms < 1e-8, "T1a track altitude: residual removed");
+
+        // Fixes stated at sea level: a mean would drag the height by ~1 m each.
+        for (int i : {0, 1, 2, 30, 31, 32}) ref.targets[(size_t)i].z = -T.t.z * 40.0;
+        const MetricFit sea = fitMetricGauge(ref, 0.0, MetricAxes::Full, 0.0,
+                                              MetricTrackOffsets::Vertical);
+        check(sea.ok && !sea.flat, "T1a track altitude: sea-level fixes, full fit");
+        check(std::fabs(sea.T.t.z - (T.t.z + mean)) < 1e-6, "T1a track altitude: height kept");
+        check(!sea.inlier_mask[0] && !sea.inlier_mask[31] && sea.inliers == 54,
+              "T1a track altitude: sea-level fixes rejected");
+        check(std::fabs(sea.trackVerticalOffset(2) - (raw[2] - mean)) < 1e-8,
+              "T1a track altitude: corrections unmoved");
     }
 
     // ---- T1b: a left-handed reference, where the guard actually fires -----
