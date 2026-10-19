@@ -1,7 +1,7 @@
 [[vk::push_constant]] cbuffer PC {
     uint nc; uint np; uint no; uint mode;
     float f0; float f1; float f2; float f3;
-    uint u4;
+    uint u4; uint u5;
 };
 
 [[vk::binding(0)]] StructuredBuffer<uint2> obs;
@@ -13,6 +13,7 @@
 [[vk::binding(6)]] StructuredBuffer<uint> adjacency;
 [[vk::binding(7)]] RWStructuredBuffer<float> vec;
 [[vk::binding(8)]] RWStructuredBuffer<float4> partial;
+[[vk::binding(9)]] RWStructuredBuffer<float4> cg_state;
 
 groupshared float4 sum64[64];
 
@@ -67,6 +68,7 @@ void gp_linearize(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+    if (mode == 1 && cg_state[1].x > 0.5) return;
     uint node = groupIndex(gid);
     if (node >= nc) return;
     float4 acc = float4(0, 0, 0, 0);
@@ -101,6 +103,7 @@ void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_points(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+    if (mode == 1 && cg_state[1].x > 0.5) return;
     uint point = groupIndex(gid) * 64 + lid.x;
     if (point >= np) return;
     uint node = nc + point;
@@ -149,6 +152,7 @@ void gp_scale_update(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_vector(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+    if ((mode == 1 || mode == 2) && cg_state[1].x > 0.5) return;
     uint i = groupIndex(gid) * 64 + lid.x;
     if (i >= dim()) return;
     float d = vec[offset(1, i)];
@@ -158,12 +162,13 @@ void gp_vector(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         vec[offset(2, i)] = 0; vec[offset(3, i)] = r;
         vec[offset(4, i)] = z; vec[offset(5, i)] = z;
     } else if (mode == 1) {
-        float r = vec[offset(3, i)] - f0 * vec[offset(6, i)];
-        vec[offset(2, i)] += f0 * vec[offset(5, i)];
+        float alpha = cg_state[0].y;
+        float r = vec[offset(3, i)] - alpha * vec[offset(6, i)];
+        vec[offset(2, i)] += alpha * vec[offset(5, i)];
         vec[offset(3, i)] = r;
-        vec[offset(4, i)] = r / (d + f1 * max(d, 1e-8));
+        vec[offset(4, i)] = r / (d + f0 * max(d, 1e-8));
     } else if (mode == 2) {
-        vec[offset(5, i)] = vec[offset(4, i)] + f0 * vec[offset(5, i)];
+        vec[offset(5, i)] = vec[offset(4, i)] + cg_state[0].z * vec[offset(5, i)];
     } else if (mode == 3) {
         vec[offset(7, i)] = vars[i] + vec[offset(2, i)];
     } else {
@@ -173,6 +178,7 @@ void gp_vector(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_reduce(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+    if (u5 != 0 && cg_state[1].x > 0.5) return;
     uint group = groupIndex(gid), i = group * 64 + lid.x;
     float4 v = float4(0, 0, 0, 0);
     if (mode == 0 && i < dim()) {
@@ -192,7 +198,36 @@ void gp_reduce(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         }
         float n = length(ray[2 * i].xyz - s * (p - c - ray[2 * i + 1].xyz));
         v.x = 0.5 * ray[2 * i].w * (n <= f0 ? n * n : 2 * f0 * n - f0 * f0);
+        if (mode == 3 && i == 0) v.y = cg_state[1].w;
     }
     v = reduce64(v, lid.x);
     if (lid.x == 0) partial[group] = v;
+}
+
+[shader("compute")] [numthreads(64, 1, 1)]
+void gp_cg_scalar(uint3 lid : SV_GroupThreadID) {
+    if (mode != 0 && cg_state[1].x > 0.5) return;
+    float4 v = float4(0, 0, 0, 0);
+    for (uint i = lid.x; i < (dim() + 63) / 64; i += 64) v += partial[i];
+    v = reduce64(v, lid.x);
+    if (lid.x != 0) return;
+    if (mode == 0) {
+        float status = v.y == 0 ? 1.0 : (!isfinite(v.y) || !isfinite(v.x) ? 2.0 : 0.0);
+        cg_state[0] = float4(v.x, 0, 0, f0 * f0 * v.y);
+        cg_state[1] = float4(status != 0 || !(v.x > 0) ? 1.0 : 0.0, 0, v.y, status);
+    } else if (mode == 1) {
+        float rho = cg_state[0].x;
+        float alpha = rho / v.x;
+        if (!(v.x > 0) || !isfinite(v.x) || !isfinite(alpha)) cg_state[1].x = 1;
+        else cg_state[0].y = alpha;
+    } else {
+        float rho = cg_state[0].x;
+        cg_state[1].y += 1;
+        if (!isfinite(v.y) || v.y <= cg_state[0].w || !(v.x > 0) || !isfinite(v.x)) {
+            cg_state[1].x = 1;
+        } else {
+            cg_state[0].z = v.x / rho;
+            cg_state[0].x = v.x;
+        }
+    }
 }

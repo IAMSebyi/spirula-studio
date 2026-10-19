@@ -116,6 +116,30 @@ static int testRotationAverage(int, char**) {
         free_ok = free_ok && rotationToAngleAxis(mul(free_result.rotations[i],
                                        transpose(independent.rotations[i]))).norm() < 1e-10;
     check(free_ok, "refinable rig rotation is not treated as fixed");
+    MatchesDatabase loop_db;
+    constexpr uint32_t loop_size = 128;
+    loop_db.images.resize(loop_size);
+    std::vector<RelativeViewEdge> loop_edges;
+    for (uint32_t i = 0; i < loop_size; i++) {
+        TwoViewMatches pair;
+        pair.image1 = i;
+        pair.image2 = (i + 1) % loop_size;
+        loop_db.pairs.push_back(pair);
+        RelativeViewEdge edge;
+        edge.status = RelativeViewStatus::Accepted;
+        edge.inliers = 100;
+        edge.pose.R = i + 1 == loop_size ? mat3Identity() : angleAxisToRotation({0, 0, 0.002});
+        loop_edges.push_back(edge);
+    }
+    RotationAverageOptions loop_opt;
+    loop_opt.max_iterations = 20;
+    loop_opt.max_error_radians = 0.3;
+    const auto loop = averageViewRotations(loop_db, loop_edges, loop_opt);
+    double loop_error = 0;
+    for (const Mat3& R : loop.rotations)
+        loop_error = std::max(loop_error, rotationToAngleAxis(R).norm());
+    check(loop.converged && loop_error < 0.01 && loop.accepted.back(),
+          "long loop distributes rotational drift globally");
     return failures ? 1 : 0;
 }
 

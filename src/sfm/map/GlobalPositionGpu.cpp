@@ -60,7 +60,7 @@ public:
             (VkDeviceSize)var_dim_ * 4, (VkDeviceSize)no_ * sizeof(Float4),
             (VkDeviceSize)no_ * sizeof(Float4), (VkDeviceSize)(nodes_ + 1) * 4,
             (VkDeviceSize)no_ * 8, (VkDeviceSize)dim_ * 8 * 4,
-            (VkDeviceSize)reductions * sizeof(Float4)};
+            (VkDeviceSize)reductions * sizeof(Float4), 2 * sizeof(Float4)};
         std::vector<VkBuffer> handles;
         for (VkDeviceSize size : bytes) {
             if (size > ctx_.maxBufferBytes())
@@ -73,7 +73,8 @@ public:
         const uint32_t* shader = findSpirv("global_position", &words);
         if (!shader) throw std::runtime_error("global positioning: shader is unavailable");
         ctx_.loadPipelines(shader, words * 4,
-            {"gp_linearize", "gp_nodes", "gp_points", "gp_scale_update", "gp_vector", "gp_reduce"});
+            {"gp_linearize", "gp_nodes", "gp_points", "gp_scale_update", "gp_vector", "gp_reduce",
+             "gp_cg_scalar"});
         const VkContext::UploadItem uploads[] = {
             {&buffers_[0], obs.data(), bytes[0]}, {&buffers_[1], rays.data(), bytes[1]},
             {&buffers_[2], vars.data(), bytes[2]}, {&buffers_[5], ranges.data(), bytes[5]},
@@ -101,45 +102,45 @@ public:
             push.f0 = (float)damping;
             dispatch(cb, "gp_vector", groups(dim_), push);
             ctx_.barrier(cb);
-            const Float4 initial = reduce(cb, 0, dim_, 0);
-            double rz = initial.x, residual0 = std::sqrt(std::max(0.0, (double)initial.y));
-            if (!(residual0 > 0) || !std::isfinite(residual0)) {
-                result.converged = residual0 == 0;
-                break;
-            }
-            float beta = 0;
+            push = base(); push.u3 = 0;
+            dispatch(cb, "gp_reduce", groups(dim_), push);
+            ctx_.barrier(cb);
+            push.f0 = (float)opt.cg_tolerance;
+            dispatch(cb, "gp_cg_scalar", 1, push);
+            ctx_.barrier(cb);
             for (int cg = 0; cg < opt.cg_iterations; cg++) {
-                if (cg % 10 == 0) cancel::check();
-                cb = ctx_.begin();
-                if (cg > 0) {
-                    push = base(); push.u3 = 2; push.f0 = beta;
-                    dispatch(cb, "gp_vector", groups(dim_), push);
-                    ctx_.barrier(cb);
-                }
                 push = base(); push.u3 = 1; push.f0 = (float)damping;
                 dispatch(cb, "gp_nodes", nc_, push);
                 dispatch(cb, "gp_points", groups(np_), push);
                 ctx_.barrier(cb);
-                const double denom = reduce(cb, 1, dim_, 0).x;
-                if (!(denom > 0) || !std::isfinite(denom) || !(rz > 0)) break;
-                cb = ctx_.begin();
-                push = base(); push.u3 = 1; push.f0 = (float)(rz / denom);
-                push.f1 = (float)damping;
+                push = base(); push.u3 = 1; push.u5 = 1;
+                dispatch(cb, "gp_reduce", groups(dim_), push);
+                ctx_.barrier(cb);
+                dispatch(cb, "gp_cg_scalar", 1, push);
+                ctx_.barrier(cb);
+                push = base(); push.u3 = 1; push.f0 = (float)damping;
                 dispatch(cb, "gp_vector", groups(dim_), push);
                 ctx_.barrier(cb);
-                const Float4 next = reduce(cb, 0, dim_, 0);
-                if (std::sqrt(std::max(0.0, (double)next.y)) <= opt.cg_tolerance * residual0) break;
-                if (!(next.x > 0) || !std::isfinite(next.x)) break;
-                beta = (float)(next.x / rz);
-                rz = next.x;
+                push = base(); push.u3 = 0; push.u5 = 1;
+                dispatch(cb, "gp_reduce", groups(dim_), push);
+                ctx_.barrier(cb);
+                push.u3 = 2;
+                dispatch(cb, "gp_cg_scalar", 1, push);
+                ctx_.barrier(cb);
+                dispatch(cb, "gp_vector", groups(dim_), push);
+                ctx_.barrier(cb);
             }
-            cb = ctx_.begin();
             push = base(); push.u3 = 3;
             dispatch(cb, "gp_vector", groups(dim_), push);
             push.u3 = 0; push.f0 = (float)damping;
             dispatch(cb, "gp_scale_update", groups(no_), push);
             ctx_.barrier(cb);
-            const double next_cost = reduce(cb, 3, no_, (float)opt.huber).x;
+            const Float4 candidate = reduce(cb, 3, no_, (float)opt.huber);
+            const double next_cost = candidate.x;
+            if (candidate.y != 0) {
+                result.converged = candidate.y == 1;
+                break;
+            }
             result.iterations = iteration + 1;
             if (std::isfinite(next_cost) && next_cost < cost) {
                 const double change = (cost - next_cost) / std::max(cost, 1e-30);
@@ -222,7 +223,9 @@ GlobalPositionResult solveGlobalPositionGpu(GlobalPositionProblem& p,
                                             int device, const std::string& selector) {
     validateGlobalPosition(p, options);
     const float huber = (float)options.huber, damping = (float)options.initial_damping;
-    if (!(huber > 0) || !std::isfinite(huber) || !(damping > 0) || !std::isfinite(damping))
+    const float cg_tolerance = (float)options.cg_tolerance;
+    if (!(huber > 0) || !std::isfinite(huber) || !(damping > 0) || !std::isfinite(damping) ||
+        !(cg_tolerance > 0) || !std::isfinite(cg_tolerance))
         throw std::invalid_argument("global positioning: options exceed GPU precision");
     const uint64_t nodes = p.cameras.size() + p.points.size();
     const uint64_t dim = 3 * nodes;

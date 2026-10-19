@@ -1349,6 +1349,7 @@ std::vector<Reconstruction> runMapper(Mapper& mapper, const MatchesDatabase& db,
         go.relative.geometry = cfg.twoview;
         go.relative.threads = cfg.threads;
         go.rigs = mapper.rigs();
+        go.fixed_focals = mapper.options().given_focal_cameras;
         go.min_triangulation_angle = cfg.mapper.min_tri_angle_deg * M_PI / 180.0;
         go.position_solver = [&](GlobalPositionProblem& problem, const GlobalPositionOptions& options) {
             return solveGlobalPositionGpu(problem, options, cfg.mapper.device, cfg.mapper.device_selector);

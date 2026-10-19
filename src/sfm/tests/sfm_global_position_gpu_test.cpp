@@ -116,6 +116,29 @@ static bool checkRigPositioning() {
     return ok;
 }
 
+static bool checkGpuReduction() {
+    GlobalPositionProblem input;
+    input.cameras = {{0, 0, 0}, {1, -1, 0}};
+    for (uint32_t j = 0; j < 1500; j++) {
+        input.points.push_back({1, 0, 0});
+        input.observations.push_back({0, j, {1, 0, 0}, 1});
+        input.observations.push_back({1, j, {0, 1, 0}, 1});
+        input.log_scales.push_back(0);
+        input.log_scales.push_back(0);
+    }
+    GlobalPositionOptions opt;
+    opt.max_iterations = 1;
+    opt.cg_iterations = 20;
+    GlobalPositionProblem zero = input;
+    const auto stationary = solveGlobalPositionGpu(zero, opt);
+    input.points.back().x = 1.05;
+    const auto tail = solveGlobalPositionGpu(input, opt);
+    const bool ok = stationary.converged && stationary.accepted == 0 && stationary.final_cost == 0 &&
+                    tail.accepted == 1 && tail.final_cost < tail.initial_cost;
+    std::printf("GPU reduction zero residual and final partial group: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static int testGlobalPositionGpu(int, char**) {
     const std::vector<Vec3> truth = {{0, 0, 0}, {1, 0.1, 0.05}, {0.1, 1, 0.1},
                                      {0.8, 0.9, 0.2}, {0.4, -0.3, 0.3}};
@@ -204,7 +227,8 @@ static int testGlobalPositionGpu(int, char**) {
         long_actual.final_cost < std::max(1e-9, long_ref.final_cost * 2);
     std::printf("long tracks CPU %.6g, GPU %.6g: %s\n", long_ref.final_cost,
                 long_actual.final_cost, long_ok ? "PASS" : "FAIL");
-    return checkSingleStep(false) && checkSingleStep(true) && checkRigPositioning() && ok && long_ok ? 0 : 1;
+    return checkSingleStep(false) && checkSingleStep(true) && checkRigPositioning() &&
+           checkGpuReduction() && ok && long_ok ? 0 : 1;
 }
 
 int main(int argc, char** argv) { return sfmTestMain(argc, argv, testGlobalPositionGpu); }

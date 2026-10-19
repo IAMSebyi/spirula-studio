@@ -14,6 +14,7 @@
 #include "sfm/map/GlobalPosition.h"
 #include "sfm/map/GlobalTracks.h"
 #include "sfm/map/RotationAverage.h"
+#include "sfm/map/ViewGraphCalibration.h"
 
 namespace sfm {
 
@@ -21,6 +22,8 @@ struct GlobalReconstructionOptions {
     RelativeViewOptions relative;
     RotationAverageOptions rotation;
     GlobalPositionOptions position;
+    FocalGraphOptions focal;
+    std::set<uint32_t> fixed_focals;
     const RigTable* rigs = nullptr;
     std::function<GlobalPositionResult(GlobalPositionProblem&, const GlobalPositionOptions&)>
         position_solver;
@@ -29,7 +32,7 @@ struct GlobalReconstructionOptions {
 };
 
 struct GlobalReconstructionStats {
-    size_t edges = 0, tracks = 0, conflicting = 0, models = 0;
+    size_t edges = 0, tracks = 0, conflicting = 0, models = 0, calibrated_focals = 0;
     bool rotation_converged = false;
 };
 
@@ -67,10 +70,16 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
         !(opt.max_initial_angle > 0 && opt.max_initial_angle <= 1.5707963267948966) ||
         !(opt.min_triangulation_angle >= 0 && opt.min_triangulation_angle <= 3.141592653589793))
         throw std::invalid_argument("global reconstruction: invalid inputs");
+    std::set<uint32_t> fixed_focals = known_focals;
+    fixed_focals.insert(opt.fixed_focals.begin(), opt.fixed_focals.end());
+    const auto calibration = calibrateViewGraph(db, features, camera_ids, camera_groups, fixed_focals,
+                                                opt.relative.geometry, opt.relative.threads, opt.focal);
+    const auto& calibrated_groups = calibration.cameras;
+    stats.calibrated_focals = calibration.calibrated.size();
     std::vector<Camera> cameras(n);
     for (size_t i = 0; i < n; i++) {
-        auto it = camera_groups.find(camera_ids[i]);
-        if (it == camera_groups.end())
+        auto it = calibrated_groups.find(camera_ids[i]);
+        if (it == calibrated_groups.end())
             throw std::invalid_argument("global reconstruction: missing camera group");
         cameras[i] = it->second;
         cameras[i].pixel_scale = features[i].pixelScale();
@@ -154,7 +163,7 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
         if (problem.metric_scale) initializeMetricRigCalibrations(model, opt.rigs);
         for (size_t i = 0; i < images.size(); i++) {
             const uint32_t id = images[i], cid = camera_ids[id];
-            model.cameras[cid] = camera_groups.at(cid);
+            model.cameras[cid] = calibrated_groups.at(cid);
             Image image;
             image.id = id;
             image.camera_id = cid;

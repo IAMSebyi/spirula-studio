@@ -19,9 +19,11 @@ namespace sfm {
 
 struct RotationAverageOptions {
     int max_iterations = 500;
+    int cg_iterations = 1000;
     double huber_radians = 0.10;
     double max_error_radians = 0.20;
     double tolerance = 1e-9;
+    double cg_tolerance = 1e-6;
 };
 
 struct RotationAverageResult {
@@ -68,8 +70,10 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
                                                    const std::vector<RelativeViewEdge>& views,
                                                    const RotationAverageOptions& opt = {}) {
     if (views.size() != db.pairs.size() || db.images.size() >= UINT32_MAX ||
-        opt.max_iterations < 1 || !(opt.huber_radians > 0) ||
-        !(opt.max_error_radians > 0) || !(opt.tolerance > 0))
+        opt.max_iterations < 1 || opt.cg_iterations < 1 || !(opt.huber_radians > 0) ||
+        !(opt.max_error_radians > 0) || !(opt.tolerance > 0) || !(opt.cg_tolerance > 0) ||
+        !std::isfinite(opt.huber_radians) || !std::isfinite(opt.max_error_radians) ||
+        !std::isfinite(opt.tolerance) || !std::isfinite(opt.cg_tolerance))
         throw std::invalid_argument("rotation averaging: invalid inputs");
     const uint32_t n = (uint32_t)db.images.size();
     RotationAverageResult out;
@@ -169,36 +173,101 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
                 }
             }
         }
-        std::vector<Vec3> sums(n);
-        std::vector<double> weights(n);
+        std::vector<Vec3> rhs(n), step(n), residual(n), preconditioned(n), direction(n), product(n);
+        std::vector<double> diagonal(n), edge_weight(views.size());
+        std::vector<Mat3> candidate(n);
+        auto anchored = [&](uint32_t i) {
+            return out.component[i] == UINT32_MAX || out.component[i] == i;
+        };
+        auto dot = [&](const std::vector<Vec3>& a, const std::vector<Vec3>& b) {
+            double sum = 0;
+            for (uint32_t i = 0; i < n; i++) sum += a[i].dot(b[i]);
+            return sum;
+        };
+        auto objective = [&](const std::vector<Mat3>& rotations) {
+            double value = 0;
+            for (size_t e : order) {
+                if (!out.accepted[e]) continue;
+                const auto& pair = db.pairs[e];
+                const Vec3 r = rotationToAngleAxis(mul(mul(transpose(rotations[pair.image2]),
+                                                           views[e].pose.R), rotations[pair.image1]));
+                const double a = r.norm();
+                value += a <= opt.huber_radians ? 0.5 * a * a :
+                         opt.huber_radians * (a - 0.5 * opt.huber_radians);
+            }
+            return value;
+        };
         for (int iter = 0; iter < opt.max_iterations; iter++) {
             cancel::check();
-            std::fill(sums.begin(), sums.end(), Vec3{});
-            std::fill(weights.begin(), weights.end(), 0.0);
+            std::fill(rhs.begin(), rhs.end(), Vec3{});
+            std::fill(diagonal.begin(), diagonal.end(), 0.0);
             for (size_t e : order) {
                 if (!out.accepted[e]) continue;
                 const auto& p = db.pairs[e];
-                const Mat3& rel = views[e].pose.R;
-                const Vec3 ra = rotationToAngleAxis(mul(mul(transpose(rel), out.rotations[p.image2]),
-                                                        transpose(out.rotations[p.image1])));
-                const Vec3 rb = rotationToAngleAxis(mul(mul(rel, out.rotations[p.image1]),
-                                                        transpose(out.rotations[p.image2])));
-                const double error = rb.norm();
+                const Vec3 r = rotationToAngleAxis(mul(mul(transpose(out.rotations[p.image2]),
+                                                           views[e].pose.R), out.rotations[p.image1]));
+                const double error = r.norm();
                 const double w = error > opt.huber_radians ? opt.huber_radians / error : 1.0;
-                sums[p.image1] = sums[p.image1] + ra * w;
-                sums[p.image2] = sums[p.image2] + rb * w;
-                weights[p.image1] += w;
-                weights[p.image2] += w;
+                edge_weight[e] = w;
+                rhs[p.image1] = rhs[p.image1] - r * w;
+                rhs[p.image2] = rhs[p.image2] + r * w;
+                diagonal[p.image1] += w;
+                diagonal[p.image2] += w;
+            }
+            std::fill(step.begin(), step.end(), Vec3{});
+            for (uint32_t i = 0; i < n; i++) {
+                residual[i] = anchored(i) ? Vec3{} : rhs[i];
+                preconditioned[i] = anchored(i) ? Vec3{} : residual[i] * (1.0 / diagonal[i]);
+                direction[i] = preconditioned[i];
+            }
+            double rz = dot(residual, preconditioned);
+            const double initial = dot(residual, residual);
+            if (initial == 0) return true;
+            if (!(rz > 0) || !std::isfinite(rz) || !std::isfinite(initial)) return false;
+            for (int cg = 0; cg < opt.cg_iterations; cg++) {
+                if (cg % 32 == 0) cancel::check();
+                std::fill(product.begin(), product.end(), Vec3{});
+                for (size_t e : order) {
+                    if (!out.accepted[e]) continue;
+                    const auto& p = db.pairs[e];
+                    const Vec3 v = (direction[p.image2] - direction[p.image1]) * edge_weight[e];
+                    product[p.image1] = product[p.image1] - v;
+                    product[p.image2] = product[p.image2] + v;
+                }
+                for (uint32_t i = 0; i < n; i++) if (anchored(i)) product[i] = {};
+                const double denom = dot(direction, product);
+                if (!(denom > 0) || !std::isfinite(denom)) break;
+                const double alpha = rz / denom;
+                for (uint32_t i = 0; i < n; i++) {
+                    step[i] = step[i] + direction[i] * alpha;
+                    residual[i] = residual[i] - product[i] * alpha;
+                }
+                if (dot(residual, residual) <= opt.cg_tolerance * opt.cg_tolerance * initial) break;
+                for (uint32_t i = 0; i < n; i++)
+                    preconditioned[i] = anchored(i) ? Vec3{} : residual[i] * (1.0 / diagonal[i]);
+                const double next = dot(residual, preconditioned);
+                if (!(next > 0) || !std::isfinite(next)) break;
+                const double beta = next / rz;
+                for (uint32_t i = 0; i < n; i++)
+                    direction[i] = preconditioned[i] + direction[i] * beta;
+                rz = next;
             }
             double largest = 0;
-            for (uint32_t i = 0; i < n; i++) {
-                if (out.component[i] == UINT32_MAX || out.component[i] == i || weights[i] == 0)
-                    continue;
-                const Vec3 step = sums[i] * (0.5 / weights[i]);
-                largest = std::max(largest, step.norm());
-                out.rotations[i] = mul(angleAxisToRotation(step), out.rotations[i]);
-            }
+            for (const Vec3& s : step) largest = std::max(largest, s.norm());
             if (largest < opt.tolerance) return true;
+            const double before = objective(out.rotations);
+            bool improved = false;
+            for (double scale = 1; scale >= 1.0 / 1024; scale *= 0.5) {
+                for (uint32_t i = 0; i < n; i++)
+                    candidate[i] = mul(out.rotations[i], angleAxisToRotation(step[i] * scale));
+                if (objective(candidate) <= before + 1e-15 * std::max(1.0, before)) {
+                    out.rotations.swap(candidate);
+                    improved = true;
+                    if (largest * scale < opt.tolerance) return true;
+                    break;
+                }
+            }
+            if (!improved) return false;
         }
         return false;
     };

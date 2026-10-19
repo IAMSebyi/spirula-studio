@@ -13,6 +13,53 @@
 
 using namespace sfm;
 
+static bool checkUnknownFocal(const RelativeViewOptions& relative) {
+    constexpr uint32_t images = 6, points = 160;
+    Camera truth;
+    truth.model = CamModel::Pinhole;
+    truth.fx = truth.fy = 1000;
+    truth.cx = 640; truth.cy = 480;
+    MatchesDatabase db;
+    db.images.resize(images);
+    std::vector<FeatureSet> features(images);
+    std::vector<Pose> poses(images);
+    for (uint32_t i = 0; i < images; i++) {
+        const double a = 0.8 * i;
+        poses[i].R = angleAxisToRotation({0.04 * std::sin(a), 0.06 * i, 0.025 * std::cos(a)});
+        const Vec3 center{0.6 * i, 0.35 * std::sin(a), 0.3 * std::cos(a)};
+        poses[i].t = mul(poses[i].R, center) * -1.0;
+        features[i].width = 1280; features[i].height = 960;
+    }
+    std::mt19937 rng(183);
+    std::uniform_real_distribution<double> xy(-2, 2), z(5, 11);
+    std::normal_distribution<double> noise(0, 0.02);
+    for (uint32_t k = 0; k < points; k++) {
+        const Vec3 X{xy(rng), xy(rng), z(rng)};
+        for (uint32_t i = 0; i < images; i++) {
+            const Vec2 p = truth.project(mul(poses[i].R, X) + poses[i].t);
+            Keypoint kp; kp.x = (float)(p.x + noise(rng)); kp.y = (float)(p.y + noise(rng));
+            features[i].keypoints.push_back(kp);
+        }
+    }
+    for (uint32_t i = 0; i < images; i++) for (uint32_t j = i + 1; j < images; j++) {
+        TwoViewMatches pair;
+        pair.image1 = i; pair.image2 = j;
+        pair.config = (int)TwoViewConfig::Uncalibrated;
+        for (uint32_t k = 0; k < points; k++) pair.matches.push_back({k, k});
+        db.pairs.push_back(std::move(pair));
+    }
+    Camera initial = truth;
+    initial.fx = initial.fy = 1250;
+    GlobalReconstructionOptions options;
+    options.relative = relative;
+    GlobalReconstructionStats stats;
+    const auto models = buildGlobalReconstructions(db, features, std::vector<uint32_t>(images, 1),
+                                                    {{1, initial}}, {}, options, stats);
+    return models.size() == 1 && models[0].numRegistered() == images &&
+           models[0].points3D.size() >= 100 &&
+           std::abs(models[0].cameras.at(1).focal() / truth.focal() - 1) < 0.05;
+}
+
 static bool checkFixedRigReconstruction(const Camera& camera, const RelativeViewOptions& relative,
                                         bool gpu) {
     constexpr uint32_t frames = 3, sensors = 2, points = 120, images = frames * sensors;
@@ -231,6 +278,7 @@ static int testGlobalFrontend(int argc, char** argv) {
           "nonconverged positioning with no progress is rejected");
     check(checkFixedRigReconstruction(cameras[0], options, false),
           "global reconstruction preserves fixed rig extrinsics and scale");
+    check(checkUnknownFocal(options), "global reconstruction calibrates unknown focal");
     if (gpu)
         check(checkFixedRigReconstruction(cameras[0], options, true),
               "Vulkan global reconstruction preserves fixed rig extrinsics and scale");
