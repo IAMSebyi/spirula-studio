@@ -118,6 +118,7 @@ struct ViewRequest {
     // render in flight is never half-switched.
     std::string primitive;    // "" = ViewerRenderConfig::primitive
     int sh_degree = -1;       // < 0 = the warmup schedule
+    std::optional<spirula::LodRenderConfig> lod_cfg;
 
     // ---- a frame for a file rather than for the screen ----
     // No overlays and no display transform: ViewResult::rgba8 comes back as

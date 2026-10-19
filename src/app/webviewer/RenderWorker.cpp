@@ -235,8 +235,11 @@ struct RenderWorker::Impl {
         Ts.resize((size_t)npx);
         {
             std::lock_guard<std::mutex> lk(*hooks.engine_mutex);
+            if (q.lod_cfg.has_value()) {
+                cfg.lod_cfg = *q.lod_cfg;
+            }
             if (cfg.scene_slot >= 0) engine_scene_activate(cfg.scene_slot);
-            if (cfg.lod_renderer && cfg.lod_cfg.enabled) {
+            if (cfg.lod_renderer) {
                 spirula::LodViewParams vp;
                 vp.width = W;
                 vp.height = H;
@@ -251,11 +254,22 @@ struct RenderWorker::Impl {
                 vp.cam_up[0]    = vm[4]; vp.cam_up[1]    = vm[5]; vp.cam_up[2]    = vm[6];
                 vp.cam_dir[0]   = vm[8]; vp.cam_dir[1]   = vm[9]; vp.cam_dir[2]   = vm[10];
 
+                float diag = 10000.0f;
+                if (cfg.lod_renderer->hierarchy()) {
+                    const auto* h = cfg.lod_renderer->hierarchy();
+                    if (!h->nodes.empty()) {
+                        diag = h->nodes[(size_t)h->root].bounds.diagonal();
+                    }
+                }
+                float zn = std::max(0.01f, diag * 1e-4f);
+                float zf = std::max(100000.0f, diag * 20.0f);
+                vp.z_near = zn;
+                vp.z_far = zf;
+
                 if (q.model == "EQUIRECTANGULAR") {
                     vp.camera_model = spirula::LodCameraModel::Equirectangular;
                 } else {
                     vp.camera_model = spirula::LodCameraModel::Pinhole;
-                    float zn = 0.1f, zf = 1000.0f;
                     float fov_rad = 2.0f * std::atan(0.5f * (float)H / q.fy);
                     float tan_half = std::tan(fov_rad * 0.5f);
                     float aspect = (float)W / (float)H;
@@ -276,7 +290,11 @@ struct RenderWorker::Impl {
                     }
                 }
 
-                cfg.lod_renderer->update_and_upload(vp, cfg.lod_cfg, cfg.scene_slot);
+                spirula::LodRenderConfig active_cfg = cfg.lod_cfg;
+                if (!active_cfg.enabled) {
+                    active_cfg.quality_threshold = 0.0f;
+                }
+                cfg.lod_renderer->update_and_upload(vp, active_cfg, cfg.scene_slot);
                 if (cfg.scene_slot >= 0) engine_scene_activate(cfg.scene_slot);
             }
             // The restore has to run whatever the render does.

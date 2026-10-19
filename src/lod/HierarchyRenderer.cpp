@@ -203,7 +203,32 @@ LodFrameStats HierarchyRenderer::update_and_upload(
             }
         }
 
-        if (num_splats > 0) {
+        if (num_splats == 0) {
+            _upload_means.assign(3, 0.0f);
+            _upload_quats.assign({1.0f, 0.0f, 0.0f, 0.0f});
+            _upload_scales.assign(3, -20.0f);
+            _upload_opacities.assign(1, -20.0f);
+            _upload_dc.assign(3, 0.0f);
+            if (coeffs > 0) _upload_sh.assign((size_t)(coeffs * 3), 0.0f);
+
+            TorchTensorView v_means   = make_view(_upload_means.data(),     {1, 3});
+            TorchTensorView v_quats   = make_view(_upload_quats.data(),     {1, 4});
+            TorchTensorView v_scales  = make_view(_upload_scales.data(),    {1, 3});
+            TorchTensorView v_opac    = make_view(_upload_opacities.data(), {1, 1});
+            TorchTensorView v_dc      = make_view(_upload_dc.data(),        {1, 3});
+            TorchTensorView v_sh      = make_view(_upload_sh.data(),        {1, coeffs, 3});
+
+            if (scene_slot >= 0) {
+                engine_scene_set_data_3dgs(
+                    scene_slot, 0,
+                    v_means, v_quats, v_scales, v_opac, v_dc, v_sh, sb_lobes);
+                engine_scene_activate(scene_slot);
+            } else {
+                set_data_3dgs(
+                    0,
+                    v_means, v_quats, v_scales, v_opac, v_dc, v_sh, sb_lobes);
+            }
+        } else {
             TorchTensorView v_means   = make_view(_upload_means.data(),     {num_splats, 3});
             TorchTensorView v_quats   = make_view(_upload_quats.data(),     {num_splats, 4});
             TorchTensorView v_scales  = make_view(_upload_scales.data(),    {num_splats, 3});

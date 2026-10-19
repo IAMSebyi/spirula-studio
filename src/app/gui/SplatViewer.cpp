@@ -190,6 +190,73 @@ void SplatViewer::run(std::string path) {
     };
     try {
         path = spirula::dense::verified_dense_file(path);
+
+        if (fs::path(path).extension() == ".slod") {
+            _kind = Kind::Splats;
+            log(format(msg::viewer_reading, {path}));
+            std::string val_err = spirula::validate_slod(path);
+            if (!val_err.empty()) return fail("Invalid .slod: " + val_err);
+
+            auto hier = std::make_shared<spirula::GaussianHierarchy>(spirula::read_slod(path, false));
+            _lod_renderer = std::make_shared<spirula::HierarchyRenderer>(hier);
+            _num_splats = hier->num_splats;
+            _sh_degree = hier->sh_degree;
+            _sb_lobes = hier->sb_lobes;
+
+            const auto& root_box = hier->nodes[(size_t)hier->root].bounds;
+            float center[3] = {root_box.center(0), root_box.center(1), root_box.center(2)};
+            float radius = root_box.diagonal() * 0.5f;
+            const float unit = view_distance_for(radius);
+            set_frame(center, unit);
+
+            ViewerRenderConfig vc;
+            vc.primitive = "3dgs";
+            vc.train_frame_scale = unit;
+            vc.train_to_normalized = {unit, 0, 0, center[0],
+                                      0, unit, 0, center[1],
+                                      0, 0, unit, center[2],
+                                      0, 0, 0, 1};
+            vc.scene_slot = _pending_slot;
+            vc.lod_renderer = _lod_renderer;
+            vc.lod_cfg.enabled = true;
+            vc.lod_cfg.quality_threshold = 1.0f;
+            const double inv = unit > 1e-20f ? 1.0 / unit : 1.0;
+            const double A[12] = {inv, 0, 0, -inv * center[0],
+                                  0, inv, 0, -inv * center[1],
+                                  0, 0, inv, -inv * center[2]};
+            if (!hier->means.empty()) {
+                vc.centers = dsparse::scene_centers(nullptr, 0, hier->means.data(),
+                                                    hier->num_splats, 3, A);
+            } else {
+                vc.centers = dsparse::scene_centers(nullptr, 0, center, 1, 3, A);
+            }
+
+            {
+#ifndef SS_BACKEND_VULKAN
+                if (!backend::device_bind())
+                    throw std::runtime_error(
+                        "could not make the selected GPU current on the viewer "
+                        "thread; restart the application or choose another GPU");
+#endif
+                std::lock_guard<std::mutex> lk(*_engine_mutex);
+                _scene_slot = _pending_slot;
+                spirula::LodViewParams init_vp;
+                init_vp.cam_pos[0] = center[0];
+                init_vp.cam_pos[1] = center[1];
+                init_vp.cam_pos[2] = center[2] + unit;
+                _lod_renderer->update_and_upload(init_vp, vc.lod_cfg, _pending_slot);
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(_mu);
+                _cfg = vc;
+                _file = path;
+            }
+            log(format(msg::viewer_loaded, {(long long)hier->num_splats, (long long)hier->sh_degree}));
+            _state = State::Ready;
+            return;
+        }
+
         // PLY faces distinguish meshes from point clouds before checkpoint lookup.
         if (meshing::is_mesh_path(path) &&
             (fs::path(path).extension() != ".ply" ||
@@ -327,55 +394,6 @@ void SplatViewer::run(std::string path) {
             return;
         }
 
-        if (fs::path(path).extension() == ".slod") {
-            _kind = Kind::Splats;
-            log(format(msg::viewer_reading, {path}));
-            std::string val_err = spirula::validate_slod(path);
-            if (!val_err.empty()) return fail("Invalid .slod: " + val_err);
-
-            auto hier = std::make_shared<spirula::GaussianHierarchy>(spirula::read_slod(path, false));
-            _lod_renderer = std::make_shared<spirula::HierarchyRenderer>(hier);
-            _num_splats = hier->num_splats;
-            _sh_degree = hier->sh_degree;
-            _sb_lobes = hier->sb_lobes;
-
-            const auto& root_box = hier->nodes[(size_t)hier->root].bounds;
-            float center[3] = {root_box.center(0), root_box.center(1), root_box.center(2)};
-            float radius = root_box.diagonal() * 0.5f;
-            const float unit = view_distance_for(radius);
-            set_frame(center, unit);
-
-            ViewerRenderConfig vc;
-            vc.primitive = "3dgs";
-            vc.train_frame_scale = unit;
-            vc.train_to_normalized = {unit, 0, 0, center[0],
-                                      0, unit, 0, center[1],
-                                      0, 0, unit, center[2],
-                                      0, 0, 0, 1};
-            vc.scene_slot = _pending_slot;
-            vc.lod_renderer = _lod_renderer;
-            vc.lod_cfg.enabled = true;
-            vc.lod_cfg.quality_threshold = 1.0f;
-
-            {
-                std::lock_guard<std::mutex> lk(*_engine_mutex);
-                _scene_slot = _pending_slot;
-                spirula::LodViewParams init_vp;
-                init_vp.cam_pos[0] = center[0];
-                init_vp.cam_pos[1] = center[1];
-                init_vp.cam_pos[2] = center[2] + unit;
-                _lod_renderer->update_and_upload(init_vp, vc.lod_cfg, _pending_slot);
-            }
-
-            {
-                std::lock_guard<std::mutex> lk(_mu);
-                _cfg = vc;
-            }
-            log(format(msg::viewer_loaded, {(long long)hier->num_splats, (long long)hier->sh_degree}));
-            _state = State::Ready;
-            return;
-        }
-
         _kind = Kind::Splats;
         log(format(msg::viewer_reading, {ply}));
         spirula::SplatCloud c = spirula::read_splat_ply(ply);
@@ -437,14 +455,26 @@ void SplatViewer::run(std::string path) {
                                                 c.num, 3, A);
         }
 
-        if (cfg.lod_rendering) {
-            fs::path slod_candidate = fs::path(ply);
-            slod_candidate.replace_extension(".slod");
+        bool has_slod = false;
+        fs::path slod_candidate = fs::path(ply);
+        slod_candidate.replace_extension(".slod");
+        if (fs::exists(slod_candidate) && spirula::validate_slod(slod_candidate.string()).empty()) {
+            has_slod = true;
+        }
+
+        auto vec = [](const spirula::Mat3f& m) {
+            return std::vector<float>(m.begin(), m.end());
+        };
+        const bool cs_on = color.splat_on();
+
+        if (cfg.lod_rendering || has_slod) {
             std::shared_ptr<spirula::GaussianHierarchy> hier;
-            if (fs::exists(slod_candidate) && spirula::validate_slod(slod_candidate.string()).empty()) {
+            if (has_slod) {
+                log(format(msg::viewer_using_run_config, {slod_candidate.string()}));
                 hier = std::make_shared<spirula::GaussianHierarchy>(
                     spirula::read_slod(slod_candidate.string(), false));
             } else {
+                log("Building runtime LOD hierarchy from splats...");
                 hier = std::make_shared<spirula::GaussianHierarchy>(
                     spirula::build_gaussian_hierarchy(c));
             }
@@ -454,38 +484,52 @@ void SplatViewer::run(std::string path) {
             vc.lod_cfg.quality_threshold = cfg.lod_quality_threshold;
             vc.lod_cfg.vram_budget_mb = cfg.lod_vram_budget_mb;
             vc.lod_cfg.debug_colorize_levels = cfg.lod_debug_levels;
-        }
 
-        {
+            {
 #ifndef SS_BACKEND_VULKAN
-            // CUDA current-device state is per thread; bind before the upload.
-            if (!backend::device_bind())
-                throw std::runtime_error(
-                    "could not make the selected GPU current on the viewer "
-                    "thread; restart the application or choose another GPU");
+                if (!backend::device_bind())
+                    throw std::runtime_error(
+                        "could not make the selected GPU current on the viewer "
+                        "thread; restart the application or choose another GPU");
 #endif
-            std::lock_guard<std::mutex> lk(*_engine_mutex);
-            const int64_t K = c.coeffs();
-            // Claimed before the upload, not after: an upload that throws part
-            // way still leaves buffers for close() to free.
-            _scene_slot = _pending_slot;
-            engine_scene_set_data_3dgs(
-                          _pending_slot, c.num,
-                          tv(c.means,       {c.num, 3}),
-                          tv(c.quats,       {c.num, 4}),
-                          tv(c.scales,      {c.num, 3}),
-                          tv(c.opacities,   {c.num, 1}),
-                          tv(c.features_dc, {c.num, 3}),
-                          tv(c.features_sh, {c.num, K, 3}), c.sb_lobes);
-            const bool cs_on = color.splat_on();
-            auto vec = [](const spirula::Mat3f& m) {
-                return std::vector<float>(m.begin(), m.end());
-            };
-            engine_scene_set_color_space(
-                _pending_slot, cs_on, (int)color.splat_transfer,
-                color.splat_linear,
-                cs_on ? vec(spirula::gamut_to_rec709(color.splat_gamut))
-                      : std::vector<float>{});
+                std::lock_guard<std::mutex> lk(*_engine_mutex);
+                _scene_slot = _pending_slot;
+                spirula::LodViewParams init_vp;
+                init_vp.cam_pos[0] = center[0];
+                init_vp.cam_pos[1] = center[1];
+                init_vp.cam_pos[2] = center[2] + unit;
+                _lod_renderer->update_and_upload(init_vp, vc.lod_cfg, _pending_slot);
+                engine_scene_set_color_space(
+                    _pending_slot, cs_on, (int)color.splat_transfer,
+                    color.splat_linear,
+                    cs_on ? vec(spirula::gamut_to_rec709(color.splat_gamut))
+                          : std::vector<float>{});
+            }
+        } else {
+            {
+#ifndef SS_BACKEND_VULKAN
+                if (!backend::device_bind())
+                    throw std::runtime_error(
+                        "could not make the selected GPU current on the viewer "
+                        "thread; restart the application or choose another GPU");
+#endif
+                std::lock_guard<std::mutex> lk(*_engine_mutex);
+                const int64_t K = c.coeffs();
+                _scene_slot = _pending_slot;
+                engine_scene_set_data_3dgs(
+                              _pending_slot, c.num,
+                              tv(c.means,       {c.num, 3}),
+                              tv(c.quats,       {c.num, 4}),
+                              tv(c.scales,      {c.num, 3}),
+                              tv(c.opacities,   {c.num, 1}),
+                              tv(c.features_dc, {c.num, 3}),
+                              tv(c.features_sh, {c.num, K, 3}), c.sb_lobes);
+                engine_scene_set_color_space(
+                    _pending_slot, cs_on, (int)color.splat_transfer,
+                    color.splat_linear,
+                    cs_on ? vec(spirula::gamut_to_rec709(color.splat_gamut))
+                          : std::vector<float>{});
+            }
         }
 
         _num_splats = c.num;

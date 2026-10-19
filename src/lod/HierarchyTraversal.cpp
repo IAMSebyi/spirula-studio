@@ -101,13 +101,14 @@ void extract_frustum_planes(const float m[16], float planes[6][4]) {
 
 }  // namespace
 
-bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16]) {
+bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16], bool check_far) {
     if (!box.valid()) return false;
 
     float planes[6][4];
     extract_frustum_planes(view_proj, planes);
 
-    for (int p = 0; p < 6; p++) {
+    const int num_planes = check_far ? 6 : 5;
+    for (int p = 0; p < num_planes; p++) {
         // Find the p-vertex (point with maximum projection along plane normal)
         float px = (planes[p][0] > 0.0f) ? box.hi[0] : box.lo[0];
         float py = (planes[p][1] > 0.0f) ? box.hi[1] : box.lo[1];
@@ -190,7 +191,8 @@ LodCutResult HierarchyTraversal::select_cut(
                 if (view.view_proj[i] != 0.0f) { has_vp = true; break; }
             }
             if (has_vp) {
-                visible = test_aabb_frustum_pinhole(node.bounds, view.view_proj);
+                bool check_far = (view.z_far > 0.0f && view.z_far < 1e6f);
+                visible = test_aabb_frustum_pinhole(node.bounds, view.view_proj, check_far);
             }
         }
 

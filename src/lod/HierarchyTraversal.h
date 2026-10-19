@@ -110,7 +110,7 @@ private:
 };
 
 // Helper: tests if AABB is inside or intersects frustum.
-bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16]);
+bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16], bool check_far = false);
 
 // Helper: tests if AABB intersects equirectangular view (conservative spherical check).
 bool test_aabb_equirectangular(const Aabb3& box, const float cam_pos[3], float z_near, float z_far);

@@ -405,7 +405,10 @@ int run_bench(int argc, char** argv) {
         float tan_half = std::tan(fov_rad * 0.5f);
         float a = 1.0f / (1.7778f * tan_half);
         float b = 1.0f / tan_half;
-        float zn = 0.1f, zf = 1000.0f;
+        float zn = std::max(0.01f, radius * 1e-4f);
+        float zf = std::max(100000.0f, radius * 20.0f);
+        view.z_near = zn;
+        view.z_far = zf;
         float P[16] = {
             a,    0.0f, 0.0f, 0.0f,
             0.0f, b,    0.0f, 0.0f,
@@ -473,7 +476,9 @@ int run_bench(int argc, char** argv) {
                               bench_ttv(viewmats[(size_t)f].data(), {1, 4, 4}),
                               bench_ttv(intr.data(), {1, 4}),
                               bench_ttv(dist.data(), {1, kCameraDistortionParams}));
-            forward_3dgs("3dgs", 0, false, false, 0);
+            if (stats.total_rendered_splats > 0) {
+                forward_3dgs("3dgs", 0, false, false, 0);
+            }
             backend::device_synchronize();
             auto t_f1 = std::chrono::steady_clock::now();
 
@@ -543,7 +548,7 @@ int run_bench(int argc, char** argv) {
         double upload_mb = (double)lod_upload_bytes / (1024.0 * 1024.0);
 
         std::printf("\nInteractive GPU Rendering Performance:\n");
-        std::printf("  Average Frame Time:      %.3f ms (%.1f FPS)\n", avg_frame_ms, 1000.0 / avg_frame_ms);
+        std::printf("  Average Frame Time:      %.3f ms (%.1f FPS)\n", avg_frame_ms, 1000.0 / std::max(0.001, avg_frame_ms));
         std::printf("  p95 Frame Time:          %.3f ms\n", p95_frame_ms);
         std::printf("  p99 Frame Time:          %.3f ms\n", p99_frame_ms);
         std::printf("  Average Upload Time:     %.3f ms\n", avg_upload_ms);
