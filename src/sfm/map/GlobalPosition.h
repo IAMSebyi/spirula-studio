@@ -20,12 +20,14 @@ struct GlobalPositionObservation {
     uint32_t camera = 0, point = 0;
     Vec3 ray;
     double weight = 1;
+    Vec3 camera_offset;
 };
 
 struct GlobalPositionProblem {
     std::vector<Vec3> cameras, points;
     std::vector<GlobalPositionObservation> observations;
     std::vector<double> log_scales;
+    bool metric_scale = false;
 };
 
 struct GlobalPositionOptions {
@@ -59,7 +61,8 @@ inline double globalPositionCost(const GlobalPositionProblem& p, double huber) {
     double cost = 0;
     for (size_t i = 0; i < p.observations.size(); i++) {
         const auto& o = p.observations[i];
-        const Vec3 r = globalPositionLinearize(o.ray, p.points[o.point], p.cameras[o.camera],
+        const Vec3 r = globalPositionLinearize(o.ray, p.points[o.point],
+                                              p.cameras[o.camera] + o.camera_offset,
                                               std::exp(p.log_scales[i])).residual;
         cost += 0.5 * o.weight * bacpu::HuberLoss::cost(r.dot(r), huber);
     }
@@ -69,7 +72,7 @@ inline double globalPositionCost(const GlobalPositionProblem& p, double huber) {
 inline void validateGlobalPosition(const GlobalPositionProblem& p,
                                    const GlobalPositionOptions& opt) {
     const size_t nc = p.cameras.size(), np = p.points.size(), no = p.observations.size();
-    if (nc < 2 || np == 0 || no == 0 || p.log_scales.size() != no ||
+    if (nc == 0 || (nc < 2 && !p.metric_scale) || np == 0 || no == 0 || p.log_scales.size() != no ||
         opt.max_iterations < 1 || opt.cg_iterations < 1 || !(opt.huber > 0) ||
         !(opt.initial_damping > 0) || !(opt.cg_tolerance > 0) ||
         !(opt.relative_tolerance > 0) || !std::isfinite(opt.huber) ||
@@ -85,6 +88,9 @@ inline void validateGlobalPosition(const GlobalPositionProblem& p,
         if (!finite(v)) throw std::invalid_argument("global positioning: invalid point position");
     std::vector<size_t> parent(nc + np);
     std::iota(parent.begin(), parent.end(), 0);
+    std::vector<Vec3> first_offset(nc);
+    std::vector<uint8_t> has_offset(nc, 0);
+    bool baseline = false;
     auto root = [&](size_t x) {
         while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
         return x;
@@ -93,16 +99,25 @@ inline void validateGlobalPosition(const GlobalPositionProblem& p,
         const auto& o = p.observations[i];
         if (o.camera >= nc || o.point >= np || !(o.weight > 0) ||
             !std::isfinite(o.weight) || !std::isfinite(o.ray.x) || !std::isfinite(o.ray.y) ||
-            !std::isfinite(o.ray.z) || std::fabs(o.ray.norm() - 1) > 1e-6 ||
+            !std::isfinite(o.ray.z) || !finite(o.camera_offset) ||
+            std::fabs(o.ray.norm() - 1) > 1e-6 ||
             !std::isfinite(p.log_scales[i]) || std::fabs(p.log_scales[i]) > 20)
             throw std::invalid_argument("global positioning: invalid observation");
         const size_t a = root(o.camera), b = root(nc + o.point);
         if (a != b) parent[b] = a;
+        if (!has_offset[o.camera]) {
+            first_offset[o.camera] = o.camera_offset;
+            has_offset[o.camera] = 1;
+        } else if ((first_offset[o.camera] - o.camera_offset).norm() > 1e-12) {
+            baseline = true;
+        }
     }
     const size_t component = root(0);
     for (size_t i = 1; i < parent.size(); i++)
         if (root(i) != component)
             throw std::invalid_argument("global positioning: disconnected observations");
+    if (p.metric_scale && !baseline)
+        throw std::invalid_argument("global positioning: metric scale has no rig baseline");
 }
 
 inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
@@ -110,6 +125,8 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
     validateGlobalPosition(p, opt);
     const size_t nc = p.cameras.size(), np = p.points.size(), no = p.observations.size();
     const size_t po = 3 * (nc - 1), so = po + 3 * np, dim = so + no;
+    const bool has_offsets = std::any_of(p.observations.begin(), p.observations.end(),
+        [](const GlobalPositionObservation& o) { return o.camera_offset.norm() > 0; });
     auto get = [](const std::vector<double>& v, size_t i) { return Vec3{v[i], v[i + 1], v[i + 2]}; };
     auto add = [](std::vector<double>& v, size_t i, const Vec3& x) {
         v[i] += x.x; v[i + 1] += x.y; v[i + 2] += x.z;
@@ -133,7 +150,7 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
         double value = 0;
         for (size_t i = 0; i < no; i++) {
             const auto& o = p.observations[i];
-            const Vec3 r = o.ray - (trial_points[o.point] - trial_cameras[o.camera]) *
+            const Vec3 r = o.ray - (trial_points[o.point] - trial_cameras[o.camera] - o.camera_offset) *
                                      std::exp(trial_scales[i]);
             value += 0.5 * o.weight * bacpu::HuberLoss::cost(r.dot(r), opt.huber);
         }
@@ -146,7 +163,7 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
         for (size_t i = 0; i < no; i++) {
             const auto& o = p.observations[i];
             scale[i] = std::exp(p.log_scales[i]);
-            delta[i] = p.points[o.point] - p.cameras[o.camera];
+            delta[i] = p.points[o.point] - p.cameras[o.camera] - o.camera_offset;
             const Vec3 residual = o.ray - delta[i] * scale[i];
             weight[i] = o.weight * bacpu::HuberLoss::weight(residual.dot(residual), opt.huber);
             const double ws = weight[i] * scale[i];
@@ -219,8 +236,8 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
             p.log_scales.swap(trial_scales);
             double norm = 0;
             for (const Vec3& c : p.cameras) norm += (c - p.cameras[0]).dot(c - p.cameras[0]);
-            norm = std::sqrt(norm / (nc - 1));
-            if (norm > 1e-12 && std::isfinite(norm)) {
+            norm = nc > 1 ? std::sqrt(norm / (nc - 1)) : 0;
+            if (!has_offsets && !p.metric_scale && norm > 1e-12 && std::isfinite(norm)) {
                 const double shift = std::log(norm);
                 bool safe = true;
                 for (double s : p.log_scales) safe = safe && std::abs(s + shift) <= 20;

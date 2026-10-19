@@ -5,12 +5,14 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <stdexcept>
 #include <vector>
 
 #include "sfm/core/Pose.h"
+#include "sfm/core/Rig.h"
 #include "sfm/map/RelativeViewGraph.h"
 
 namespace sfm {
@@ -29,6 +31,38 @@ struct RotationAverageResult {
     std::vector<uint8_t> accepted;
     bool converged = false;
 };
+
+struct FixedRigFrames {
+    std::vector<uint32_t> frame;
+    std::vector<Pose> sensor_from_rig;
+};
+
+inline FixedRigFrames fixedRigFrames(size_t n, const RigTable* rigs) {
+    if (n >= UINT32_MAX) throw std::invalid_argument("rotation averaging: too many images");
+    FixedRigFrames out;
+    out.frame.resize(n);
+    std::iota(out.frame.begin(), out.frame.end(), 0);
+    out.sensor_from_rig.assign(n, Pose{mat3Identity(), {0, 0, 0}});
+    if (!rigs) return out;
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> frame_id;
+    for (uint32_t image = 0; image < n; image++) {
+        const RigSlot slot = rigs->slot(image);
+        if (!slot.valid()) continue;
+        if (slot.rig >= rigs->rigs.size() || slot.member >= rigs->rigs[slot.rig].members.size() ||
+            slot.frame >= rigs->rigs[slot.rig].frames.size())
+            throw std::invalid_argument("rotation averaging: invalid rig slot");
+        const RigMemberDef& member = rigs->rigs[slot.rig].members[slot.member];
+        if (!member.has_ext || !member.ext_fixed) continue;
+        for (double v : member.ext.R)
+            if (!std::isfinite(v)) throw std::invalid_argument("rotation averaging: invalid rig rotation");
+        if (!std::isfinite(member.ext.t.x) || !std::isfinite(member.ext.t.y) ||
+            !std::isfinite(member.ext.t.z))
+            throw std::invalid_argument("rotation averaging: invalid rig translation");
+        out.frame[image] = frame_id.emplace(std::make_pair(slot.rig, slot.frame), image).first->second;
+        out.sensor_from_rig[image] = member.ext;
+    }
+    return out;
+}
 
 inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
                                                    const std::vector<RelativeViewEdge>& views,
@@ -180,6 +214,52 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
         }
     }
     out.converged = removed ? solve() : first_converged;
+    return out;
+}
+
+inline RotationAverageResult averageRigViewRotations(const MatchesDatabase& db,
+                                                      const std::vector<RelativeViewEdge>& views,
+                                                      const RigTable* rigs,
+                                                      const RotationAverageOptions& opt = {}) {
+    if (!rigs || rigs->empty()) return averageViewRotations(db, views, opt);
+    if (views.size() != db.pairs.size() || db.images.size() >= UINT32_MAX)
+        throw std::invalid_argument("rotation averaging: invalid inputs");
+    const size_t n = db.images.size();
+    const FixedRigFrames layout = fixedRigFrames(n, rigs);
+    const auto& frame = layout.frame;
+    MatchesDatabase frames;
+    frames.images.resize(n);
+    frames.pairs.resize(db.pairs.size());
+    std::vector<RelativeViewEdge> frame_views(views.size());
+    for (size_t i = 0; i < views.size(); i++) {
+        const auto& pair = db.pairs[i];
+        if (views[i].status != RelativeViewStatus::Accepted) continue;
+        if (pair.image1 >= n || pair.image2 >= n || pair.image1 == pair.image2)
+            throw std::invalid_argument("rotation averaging: invalid accepted pair");
+        const uint32_t a = pair.image1, b = pair.image2;
+        frames.pairs[i].image1 = frame[a];
+        frames.pairs[i].image2 = frame[b];
+        if (frame[a] == frame[b]) continue;
+        frame_views[i].status = RelativeViewStatus::Accepted;
+        frame_views[i].inliers = views[i].inliers;
+        frame_views[i].pose.R = mul(mul(transpose(layout.sensor_from_rig[b].R), views[i].pose.R),
+                                   layout.sensor_from_rig[a].R);
+    }
+    RotationAverageResult out = averageViewRotations(frames, frame_views, opt);
+    const auto frame_rotations = out.rotations;
+    const auto frame_components = out.component;
+    for (uint32_t image = 0; image < n; image++) {
+        out.rotations[image] = mul(layout.sensor_from_rig[image].R, frame_rotations[frame[image]]);
+        out.component[image] = frame_components[frame[image]];
+    }
+    for (size_t i = 0; i < views.size(); i++) {
+        if (views[i].status != RelativeViewStatus::Accepted) continue;
+        const uint32_t a = db.pairs[i].image1, b = db.pairs[i].image2;
+        if (frame[a] != frame[b] || out.component[a] == UINT32_MAX) continue;
+        const Mat3 expected = mul(layout.sensor_from_rig[b].R, transpose(layout.sensor_from_rig[a].R));
+        out.accepted[i] = rotationToAngleAxis(mul(expected, transpose(views[i].pose.R))).norm()
+                          <= opt.max_error_radians;
+    }
     return out;
 }
 

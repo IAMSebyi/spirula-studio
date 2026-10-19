@@ -17,7 +17,7 @@
 groupshared float4 sum64[64];
 
 uint groupIndex(uint3 g) { return g.x + 65535 * g.y; }
-uint dim() { return 3 * (nc + np) + no; }
+uint dim() { return 3 * (nc + np); }
 uint scaleBase() { return 3 * (nc + np); }
 uint offset(uint slot, uint i) { return slot * dim() + i; }
 float3 read3(uint i) { return float3(vars[i], vars[i + 1], vars[i + 2]); }
@@ -36,30 +36,39 @@ float4 reduce64(float4 v, uint lane) {
     }
     return sum64[0];
 }
+float scaleDiagonal(float4 ds, float4 rw) {
+    float h = rw.w * ds.w * ds.w * dot(ds.xyz, ds.xyz);
+    return h + f0 * max(h, 1e-8);
+}
+float3 scaleRhsCorrection(uint i, float4 ds, float4 rw) {
+    if (i == 0 && u4 == 0) return float3(0, 0, 0);
+    float ws = rw.w * ds.w;
+    return ds.xyz * (ws * ds.w * ws * dot(ds.xyz, rw.xyz) / scaleDiagonal(ds, rw));
+}
+float3 reducedProduct(uint i, float4 ds, float4 rw, float3 diff) {
+    float wss = rw.w * ds.w * ds.w;
+    if (i != 0 || u4 != 0) diff -= ds.xyz * (wss * dot(ds.xyz, diff) / scaleDiagonal(ds, rw));
+    return wss * diff;
+}
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_linearize(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     uint i = groupIndex(gid) * 64 + lid.x;
     if (i >= no) return;
     uint2 o = obs[i];
-    float3 d = read3(3 * (nc + o.y)) - read3(3 * o.x);
+    float3 d = read3(3 * (nc + o.y)) - read3(3 * o.x) - ray[2 * i + 1].xyz;
     float s = exp(vars[scaleBase() + i]);
-    float3 r = ray[i].xyz - s * d;
+    float3 r = ray[2 * i].xyz - s * d;
     float length_r = length(r);
-    float w = ray[i].w * (length_r > f0 ? f0 / length_r : 1.0);
+    float w = ray[2 * i].w * (length_r > f0 ? f0 / length_r : 1.0);
     delta_scale[i] = float4(d, s);
     residual_weight[i] = float4(r, w);
-    uint si = scaleBase() + i;
-    // Fix one observation scale to remove the global scale gauge.
-    vec[offset(0, si)] = i == 0 ? 0.0 : w * s * dot(d, r);
-    vec[offset(1, si)] = i == 0 ? 1.0 : w * s * s * dot(d, d);
 }
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     uint node = groupIndex(gid);
-    if (node >= nc + np) return;
-    bool camera = node < nc;
+    if (node >= nc) return;
     float4 acc = float4(0, 0, 0, 0);
     for (uint j = ranges[node] + lid.x; j < ranges[node + 1]; j += 64) {
         uint i = adjacency[j];
@@ -67,14 +76,13 @@ void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float4 ds = delta_scale[i], rw = residual_weight[i];
         float ws = rw.w * ds.w;
         if (mode == 0) {
-            acc.xyz += (camera ? -1.0 : 1.0) * ws * rw.xyz;
+            acc.xyz += -ws * rw.xyz + scaleRhsCorrection(i, ds, rw);
             acc.w += ws * ds.w;
         } else {
             float3 c = vec3(5, 3 * o.x);
             float3 p = vec3(5, 3 * (nc + o.y));
-            float s = vec[offset(5, scaleBase() + i)];
-            float3 jt = rw.w * ds.w * ds.w * (c - p - ds.xyz * s);
-            acc.xyz += (camera ? 1.0 : -1.0) * jt;
+            float3 jt = reducedProduct(i, ds, rw, c - p);
+            acc.xyz += jt;
         }
     }
     acc = reduce64(acc, lid.x);
@@ -92,16 +100,51 @@ void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
 }
 
 [shader("compute")] [numthreads(64, 1, 1)]
-void gp_scale_product(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+void gp_points(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
+    uint point = groupIndex(gid) * 64 + lid.x;
+    if (point >= np) return;
+    uint node = nc + point;
+    float4 acc = float4(0, 0, 0, 0);
+    for (uint j = ranges[node]; j < ranges[node + 1]; j++) {
+        uint i = adjacency[j];
+        uint2 o = obs[i];
+        float4 ds = delta_scale[i], rw = residual_weight[i];
+        float ws = rw.w * ds.w;
+        if (mode == 0) {
+            acc.xyz += ws * rw.xyz - scaleRhsCorrection(i, ds, rw);
+            acc.w += ws * ds.w;
+        } else {
+            float3 c = vec3(5, 3 * o.x);
+            float3 p = vec3(5, 3 * node);
+            acc.xyz -= reducedProduct(i, ds, rw, c - p);
+        }
+    }
+    uint base = 3 * node;
+    if (mode == 0) {
+        put3(0, base, acc.xyz);
+        put3(1, base, float3(acc.w, acc.w, acc.w));
+    } else {
+        float3 diag = vec3(1, base);
+        put3(6, base, acc.xyz + f0 * max(diag, 1e-8) * vec3(5, base));
+    }
+}
+
+[shader("compute")] [numthreads(64, 1, 1)]
+void gp_scale_update(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     uint i = groupIndex(gid) * 64 + lid.x;
     if (i >= no) return;
-    uint2 o = obs[i];
-    float4 ds = delta_scale[i], rw = residual_weight[i];
     uint si = scaleBase() + i;
-    float3 diff = vec3(5, 3 * o.x) - vec3(5, 3 * (nc + o.y)) - ds.xyz * vec[offset(5, si)];
-    float value = -rw.w * ds.w * ds.w * dot(ds.xyz, diff);
-    vec[offset(6, si)] = (i == 0 ? 0.0 : value) +
-        f0 * max(vec[offset(1, si)], 1e-8) * vec[offset(5, si)];
+    if (mode == 0) {
+        uint2 o = obs[i];
+        float4 ds = delta_scale[i], rw = residual_weight[i];
+        float3 diff = vec3(2, 3 * o.x) - vec3(2, 3 * (nc + o.y));
+        float wss = rw.w * ds.w * ds.w;
+        float rhs = rw.w * ds.w * dot(ds.xyz, rw.xyz);
+        float step = i == 0 && u4 == 0 ? 0.0 : (rhs + wss * dot(ds.xyz, diff)) / scaleDiagonal(ds, rw);
+        residual_weight[i].x = clamp(vars[si] + clamp(step, -2.0, 2.0), -20.0, 20.0);
+    } else {
+        vars[si] = residual_weight[i].x;
+    }
 }
 
 [shader("compute")] [numthreads(64, 1, 1)]
@@ -122,10 +165,7 @@ void gp_vector(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     } else if (mode == 2) {
         vec[offset(5, i)] = vec[offset(4, i)] + f0 * vec[offset(5, i)];
     } else if (mode == 3) {
-        float step = vec[offset(2, i)];
-        if (i >= scaleBase()) step = clamp(step, -2.0, 2.0);
-        float x = vars[i] + step;
-        vec[offset(7, i)] = i >= scaleBase() ? clamp(x, -20.0, 20.0) : x;
+        vec[offset(7, i)] = vars[i] + vec[offset(2, i)];
     } else {
         vars[i] = vec[offset(7, i)];
     }
@@ -148,10 +188,10 @@ void gp_reduce(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         if (mode == 2) {
             c = read3(cb); p = read3(pb); s = exp(vars[si]);
         } else {
-            c = vec3(7, cb); p = vec3(7, pb); s = exp(vec[offset(7, si)]);
+            c = vec3(7, cb); p = vec3(7, pb); s = exp(residual_weight[i].x);
         }
-        float n = length(ray[i].xyz - s * (p - c));
-        v.x = 0.5 * ray[i].w * (n <= f0 ? n * n : 2 * f0 * n - f0 * f0);
+        float n = length(ray[2 * i].xyz - s * (p - c - ray[2 * i + 1].xyz));
+        v.x = 0.5 * ray[2 * i].w * (n <= f0 ? n * n : 2 * f0 * n - f0 * f0);
     }
     v = reduce64(v, lid.x);
     if (lid.x == 0) partial[group] = v;

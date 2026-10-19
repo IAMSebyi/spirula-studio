@@ -82,7 +82,7 @@ whole-model pass to be expensive. `Bottomup.h` carries the numbers.
 
 `--mapper global` uses experimental global initialization before the same BA and
 assembly stages. Positioning runs on Vulkan; pairwise planar and panoramic
-geometries are skipped, and rigs and sensor priors enter only during BA. Its
+geometries are skipped, and fixed rig rotations also constrain averaging. Its
 scope and validation are in `docs/notes/global-sfm.md`.
 
 What each mapper produces is a set of models,

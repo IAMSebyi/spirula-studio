@@ -11,6 +11,111 @@
 
 using namespace sfm;
 
+static bool checkSingleStep(bool metric) {
+    GlobalPositionProblem p;
+    p.cameras = {{0, 0, 0}, {0.99, 0.03, 0.01}};
+    p.points = {{0.24, 0.08, 1.04}};
+    p.observations = {{0, 0, Vec3{0.2, 0.1, 1}.normalized(), 1},
+                      {1, 0, Vec3{-0.8, 0.1, 1}.normalized(), 0.7}};
+    p.log_scales = {0, -0.2};
+    if (metric) {
+        p.metric_scale = true;
+        p.observations.push_back({0, 0, Vec3{-0.1, 0.1, 1}.normalized(), 0.9, {0.3, 0, 0}});
+        p.log_scales.push_back(-0.1);
+    }
+    const int dim = metric ? 9 : 7;
+    GlobalPositionOptions opt;
+    opt.max_iterations = 1;
+    opt.cg_iterations = 100;
+    opt.cg_tolerance = 1e-7;
+    opt.initial_damping = 0.5;
+    opt.huber = 10;
+    double H[9][9] = {}, b[9] = {};
+    for (size_t i = 0; i < p.observations.size(); i++) {
+        const auto& o = p.observations[i];
+        const Vec3 d = p.points[0] - p.cameras[o.camera] - o.camera_offset;
+        const double s = std::exp(p.log_scales[i]);
+        const Vec3 r = o.ray - d * s;
+        const double delta[3] = {d.x, d.y, d.z};
+        const double residual[3] = {r.x, r.y, r.z};
+        for (int axis = 0; axis < 3; axis++) {
+            double J[9] = {};
+            if (o.camera) J[axis] = s;
+            J[3 + axis] = -s;
+            if (metric || i) J[metric ? 6 + i : 5 + i] = -s * delta[axis];
+            for (int a = 0; a < dim; a++) {
+                b[a] -= o.weight * J[a] * residual[axis];
+                for (int c = 0; c < dim; c++) H[a][c] += o.weight * J[a] * J[c];
+            }
+        }
+    }
+    for (int i = 0; i < dim; i++) H[i][i] += opt.initial_damping * std::max(H[i][i], 1e-8);
+    for (int i = 0; i < dim; i++) {
+        for (int j = i + 1; j < dim; j++) {
+            const double factor = H[j][i] / H[i][i];
+            for (int k = i; k < dim; k++) H[j][k] -= factor * H[i][k];
+            b[j] -= factor * b[i];
+        }
+    }
+    double step[9];
+    for (int i = dim - 1; i >= 0; i--) {
+        step[i] = b[i];
+        for (int j = i + 1; j < dim; j++) step[i] -= H[i][j] * step[j];
+        step[i] /= H[i][i];
+    }
+    const auto before = p;
+    const auto result = solveGlobalPositionGpu(p, opt);
+    double actual[9] = {p.cameras[1].x - before.cameras[1].x,
+                              p.cameras[1].y - before.cameras[1].y,
+                              p.cameras[1].z - before.cameras[1].z,
+                              p.points[0].x - before.points[0].x,
+                              p.points[0].y - before.points[0].y,
+                              p.points[0].z - before.points[0].z};
+    for (size_t i = metric ? 0 : 1; i < p.log_scales.size(); i++)
+        actual[metric ? 6 + i : 5 + i] = p.log_scales[i] - before.log_scales[i];
+    double error = 0;
+    for (int i = 0; i < dim; i++) error = std::max(error, std::abs(actual[i] - step[i]));
+    std::printf("Schur step versus full normal equations%s: %.3g %s\n", metric ? " with rig" : "", error,
+                result.accepted && error < 2e-5 ? "PASS" : "FAIL");
+    return result.accepted && error < 2e-5;
+}
+
+static bool checkRigPositioning() {
+    const std::vector<Vec3> cameras{{0, 0, 0}, {0.7, 0.2, 0.1}, {1.3, -0.1, 0.2}};
+    const std::vector<Vec3> offsets{{0.3, 0, 0}, {0.28, 0.1, 0.04}, {0.23, -0.1, 0.16}};
+    GlobalPositionProblem input;
+    input.metric_scale = true;
+    for (size_t i = 0; i < cameras.size(); i++)
+        input.cameras.push_back(cameras[i] + (i ? Vec3{0.02, -0.01, 0.015} : Vec3{}));
+    std::mt19937 rng(43);
+    std::uniform_real_distribution<double> xy(-1, 1), depth(2, 4);
+    for (uint32_t j = 0; j < 40; j++) {
+        const Vec3 point{xy(rng), xy(rng), depth(rng)};
+        input.points.push_back(point + Vec3{0.01, -0.02, 0.03});
+        for (uint32_t i = 0; i < cameras.size(); i++)
+            for (int sensor = 0; sensor < 2; sensor++) {
+                const Vec3 offset = sensor ? offsets[i] : Vec3{};
+                const Vec3 ray = (point - cameras[i] - offset).normalized();
+                input.observations.push_back({i, j, ray, 1, offset});
+                input.log_scales.push_back(-std::log((input.points[j] - input.cameras[i] - offset).norm()));
+            }
+    }
+    GlobalPositionProblem cpu = input, gpu = input;
+    GlobalPositionOptions opt;
+    opt.max_iterations = 100;
+    opt.cg_iterations = 150;
+    const auto ref = solveGlobalPosition(cpu, opt);
+    const auto actual = solveGlobalPositionGpu(gpu, opt);
+    double error = 0;
+    for (size_t i = 0; i < cameras.size(); i++)
+        error = std::max(error, (gpu.cameras[i] - cameras[i]).norm());
+    const bool ok = actual.final_cost < 1e-7 && error < 0.03 &&
+                    std::abs(gpu.log_scales[0] - input.log_scales[0]) > 1e-5;
+    std::printf("rig positioning CPU %.6g, GPU %.6g, camera error %.4g: %s\n",
+                ref.final_cost, actual.final_cost, error, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static int testGlobalPositionGpu(int, char**) {
     const std::vector<Vec3> truth = {{0, 0, 0}, {1, 0.1, 0.05}, {0.1, 1, 0.1},
                                      {0.8, 0.9, 0.2}, {0.4, -0.3, 0.3}};
@@ -23,6 +128,7 @@ static int testGlobalPositionGpu(int, char**) {
         const Vec3 point{xy(rng), xy(rng), depth(rng)};
         input.points.push_back(point);
         for (uint32_t i = 0; i < truth.size(); i++) {
+            if (j >= 40 && i >= 3) continue;
             Vec3 ray = (point - truth[i]).normalized();
             ray = (ray + Vec3{noise(rng), noise(rng), noise(rng)}).normalized();
             if ((j * truth.size() + i) % 23 == 0)
@@ -65,7 +171,40 @@ static int testGlobalPositionGpu(int, char**) {
                 ref.final_cost, actual.final_cost, error, actual.iterations, ok ? "PASS" : "FAIL");
     if (!ok) std::printf("gauge %d, invalid weight %d, invalid option %d\n",
                          gauge, invalid_weight, invalid_option);
-    return ok ? 0 : 1;
+    GlobalPositionProblem long_input;
+    const uint32_t camera_count = 66, point_count = 10;
+    std::vector<Vec3> long_cameras;
+    for (uint32_t i = 0; i < camera_count; i++) {
+        const double a = 6.283185307179586 * i / camera_count;
+        long_cameras.push_back({std::cos(a), std::sin(a), 0.3 * std::sin(2 * a)});
+    }
+    std::vector<Vec3> long_points;
+    for (uint32_t i = 0; i < point_count; i++)
+        long_points.push_back({xy(rng), xy(rng), depth(rng)});
+    const Vec3 origin = long_cameras[0];
+    const double factor = 1.0 / (long_points[0] - origin).norm();
+    for (uint32_t i = 0; i < camera_count; i++)
+        long_input.cameras.push_back((long_cameras[i] - origin) * factor +
+            (i ? Vec3{0.001, -0.002, 0.001} : Vec3{}));
+    for (uint32_t j = 0; j < point_count; j++)
+        long_input.points.push_back((long_points[j] - origin) * factor + Vec3{-0.002, 0.001, 0.002});
+    for (uint32_t j = 0; j < point_count; j++)
+        for (uint32_t i = 0; i < camera_count; i++) {
+            long_input.observations.push_back({i, j, (long_points[j] - long_cameras[i]).normalized(), 1});
+            long_input.log_scales.push_back(-std::log((long_points[j] - long_cameras[i]).norm() * factor));
+        }
+    GlobalPositionProblem long_cpu = long_input, long_gpu = long_input;
+    GlobalPositionOptions long_opt;
+    long_opt.max_iterations = 40;
+    long_opt.cg_iterations = 80;
+    const auto long_ref = solveGlobalPosition(long_cpu, long_opt);
+    const auto long_actual = solveGlobalPositionGpu(long_gpu, long_opt);
+    const bool long_ok = std::isfinite(long_actual.final_cost) &&
+        long_actual.final_cost < long_actual.initial_cost * 0.1 &&
+        long_actual.final_cost < std::max(1e-9, long_ref.final_cost * 2);
+    std::printf("long tracks CPU %.6g, GPU %.6g: %s\n", long_ref.final_cost,
+                long_actual.final_cost, long_ok ? "PASS" : "FAIL");
+    return checkSingleStep(false) && checkSingleStep(true) && checkRigPositioning() && ok && long_ok ? 0 : 1;
 }
 
 int main(int argc, char** argv) { return sfmTestMain(argc, argv, testGlobalPositionGpu); }

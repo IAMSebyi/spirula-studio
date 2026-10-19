@@ -60,6 +60,62 @@ static int testRotationAverage(int, char**) {
     const Mat3 expected = mul(truth[6], transpose(truth[5]));
     check(rotationToAngleAxis(mul(result.rotations[6], transpose(expected))).norm() < 1e-8,
           "reversed edge convention");
+    MatchesDatabase rig_db;
+    rig_db.images.resize(6);
+    RigSpec spec;
+    spec.members.resize(2);
+    spec.members[0].has_ext = true;
+    spec.members[0].ext = {mat3Identity(), {0, 0, 0}};
+    spec.members[1].has_ext = true;
+    spec.members[1].ext = {angleAxisToRotation({0.1, -0.3, 0.2}), {0.2, 0, 0}};
+    spec.frames = {{0, 1}, {2, 3}, {4, 5}};
+    RigTable rigs;
+    rigs.rigs.push_back(spec);
+    rigs.index(rig_db.images.size());
+    std::vector<Mat3> rig_truth;
+    for (uint32_t f = 0; f < 3; f++) {
+        const Mat3 frame_rotation = angleAxisToRotation({0.04 * f, -0.08 * f, 0.03 * f});
+        for (uint32_t m = 0; m < 2; m++)
+            rig_truth.push_back(mul(spec.members[m].ext.R, frame_rotation));
+    }
+    std::vector<RelativeViewEdge> rig_edges;
+    auto rig_edge = [&](uint32_t a, uint32_t b, const Mat3& noise) {
+        TwoViewMatches pair;
+        pair.image1 = a;
+        pair.image2 = b;
+        rig_db.pairs.push_back(pair);
+        RelativeViewEdge edge;
+        edge.pose.R = mul(noise, mul(rig_truth[b], transpose(rig_truth[a])));
+        edge.inliers = 100;
+        edge.status = RelativeViewStatus::Accepted;
+        rig_edges.push_back(edge);
+    };
+    for (uint32_t a = 0; a < 3; a++)
+        for (uint32_t b = a + 1; b < 3; b++)
+            for (uint32_t m = 0; m < 2; m++)
+                rig_edge(2 * a + m, 2 * b + m,
+                         angleAxisToRotation({m ? 0.004 : -0.004, 0.002, 0}));
+    rig_edge(0, 1, mat3Identity());
+    rig_edge(2, 3, angleAxisToRotation({0.5, 0, 0}));
+    const auto rig_result = averageRigViewRotations(rig_db, rig_edges, &rigs, opt);
+    bool rig_ok = true;
+    for (uint32_t f = 0; f < 3; f++) {
+        const Mat3 actual = mul(rig_result.rotations[2 * f + 1],
+                                transpose(rig_result.rotations[2 * f]));
+        rig_ok = rig_ok && rotationToAngleAxis(mul(actual, transpose(spec.members[1].ext.R))).norm()
+                           < 1e-8;
+    }
+    check(rig_ok && rig_result.accepted[6] && !rig_result.accepted[7],
+          "fixed rig rotations share frame orientation and reject inconsistent edges");
+    rigs.rigs[0].members[1].ext_fixed = false;
+    const auto free_result = averageRigViewRotations(rig_db, rig_edges, &rigs, opt);
+    const auto independent = averageViewRotations(rig_db, rig_edges, opt);
+    bool free_ok = free_result.accepted == independent.accepted &&
+                   free_result.component == independent.component;
+    for (size_t i = 0; i < rig_db.images.size(); i++)
+        free_ok = free_ok && rotationToAngleAxis(mul(free_result.rotations[i],
+                                       transpose(independent.rotations[i]))).norm() < 1e-10;
+    check(free_ok, "refinable rig rotation is not treated as fixed");
     return failures ? 1 : 0;
 }
 

@@ -12,20 +12,38 @@
 using namespace sfm;
 
 static int testGlobalMapper(int argc, char** argv) {
-    constexpr uint32_t nimages = 5, npoints = 160;
+    bool gpu_ba = false, rig = false;
+    for (int i = 1; i < argc; i++) {
+        gpu_ba = gpu_ba || std::string(argv[i]) == "--vulkan";
+        rig = rig || std::string(argv[i]) == "--rig";
+    }
+    constexpr uint32_t nimages = 6, npoints = 160;
     MatchesDatabase db;
     db.images.resize(nimages);
     std::vector<FeatureSet> features(nimages);
     const Camera camera = Camera::defaultFor(1, 1280, 960, 1000);
     const std::vector<Vec3> centres = {{0, 0, 0}, {0.8, 0, 0}, {0.1, 0.7, 0.1},
-                                       {0.8, 0.7, 0.1}, {0.4, 0.3, 0.4}};
+                                       {0.8, 0.7, 0.1}, {0.4, 0.3, 0.4}, {1.1, 0.4, 0.3}};
+    RigTable rigs;
+    if (rig) {
+        RigSpec spec;
+        spec.members.resize(2);
+        spec.members[0].has_ext = spec.members[1].has_ext = true;
+        spec.members[0].ext = {mat3Identity(), {0, 0, 0}};
+        spec.members[1].ext = {angleAxisToRotation({0.01, -0.02, 0.005}), {-0.3, 0.02, 0}};
+        spec.frames = {{0, 1}, {2, 3}, {4, 5}};
+        rigs.rigs.push_back(spec);
+        rigs.index(nimages);
+    }
     std::vector<Pose> poses(nimages);
     for (uint32_t i = 0; i < nimages; i++) {
         db.images[i] = {"global_" + std::to_string(i) + ".jpg", npoints};
         features[i].width = 1280;
         features[i].height = 960;
-        poses[i].R = angleAxisToRotation({0.01 * i, 0.025 * i, -0.005 * i});
-        poses[i].t = mul(poses[i].R, centres[i]) * -1.0;
+        const uint32_t frame = rig ? i / 2 : i;
+        const Mat3 R = angleAxisToRotation({0.01 * frame, 0.025 * frame, -0.005 * frame});
+        const Pose frame_pose{R, mul(R, centres[rig ? 2 * frame : frame]) * -1.0};
+        poses[i] = rig ? composePose(rigs.rigs[0].members[i % 2].ext, frame_pose) : frame_pose;
     }
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> xy(-1.5, 1.5), z(4, 8);
@@ -55,13 +73,13 @@ static int testGlobalMapper(int argc, char** argv) {
     cfg.mapper.initial_cameras = {{1, camera}};
     cfg.mapper.known_focal_cameras = {1};
     cfg.mapper.given_focal_cameras = {1};
-    cfg.mapper.ba_real = argc > 1 && std::string(argv[1]) == "--vulkan" ? "float" : "cpu";
+    cfg.mapper.ba_real = gpu_ba ? "float" : "cpu";
     cfg.mapper.ba_real_coarse = cfg.mapper.ba_real;
     cfg.manager.do_grow = false;
     cfg.manager.do_reseed = false;
     cfg.manager.do_audit = false;
     cfg.assemble.reseed_trials = 0;
-    Mapper mapper(db, features, cfg.mapper, std::vector<uint32_t>(nimages, 1));
+    Mapper mapper(db, features, cfg.mapper, std::vector<uint32_t>(nimages, 1), rig ? &rigs : nullptr);
     AssembleStats stats;
     auto models = runMapper(mapper, db, features, cfg, stats);
     if (models.size() != 1 || models[0].numRegistered() != nimages ||
@@ -79,10 +97,25 @@ static int testGlobalMapper(int argc, char** argv) {
     models[0].writeBinary(path.string());
     const Reconstruction loaded = Reconstruction::readBinary(path.string());
     std::filesystem::remove_all(path);
-    const bool ok = std::isfinite(mean) && mean < 2 && observations >= 300 &&
-                    loaded.numRegistered() == nimages &&
-                    loaded.points3D.size() == models[0].points3D.size();
-    std::printf("global mapping, BA and export: %s (%zu points, %zu observations, %.3f px)\n",
+    bool ok = std::isfinite(mean) && mean < 2 && observations >= 300 &&
+              loaded.numRegistered() == nimages &&
+              loaded.points3D.size() == models[0].points3D.size();
+    if (rig) {
+        const Pose expected = rigs.rigs[0].members[1].ext;
+        for (uint32_t f = 0; f < nimages / 2; f++) {
+            const Pose actual = relativePose(loaded.images.at(2 * f).pose,
+                                             loaded.images.at(2 * f + 1).pose);
+            ok = ok && (actual.t - expected.t).norm() < 1e-4 &&
+                 rotationToAngleAxis(mul(actual.R, transpose(expected.R))).norm() < 1e-5;
+        }
+        const Pose& a = loaded.images.at(0).pose;
+        const Pose& b = loaded.images.at(4).pose;
+        const Vec3 ca = mul(transpose(a.R), a.t) * -1.0;
+        const Vec3 cb = mul(transpose(b.R), b.t) * -1.0;
+        ok = ok && std::abs((cb - ca).norm() - (centres[4] - centres[0]).norm()) < 0.1;
+    }
+    std::printf("global mapping, BA and export%s: %s (%zu points, %zu observations, %.3f px)\n",
+                rig ? " with rig" : "",
                 ok ? "PASS" : "FAIL", models[0].points3D.size(), observations, mean);
     return ok ? 0 : 1;
 }

@@ -21,9 +21,10 @@ struct GlobalReconstructionOptions {
     RelativeViewOptions relative;
     RotationAverageOptions rotation;
     GlobalPositionOptions position;
+    const RigTable* rigs = nullptr;
     std::function<GlobalPositionResult(GlobalPositionProblem&, const GlobalPositionOptions&)>
         position_solver;
-    double max_initial_angle = 0.10;
+    double max_initial_angle = 0.017453292519943295;
     double min_triangulation_angle = 0.02617993877991494;
 };
 
@@ -31,6 +32,29 @@ struct GlobalReconstructionStats {
     size_t edges = 0, tracks = 0, conflicting = 0, models = 0;
     bool rotation_converged = false;
 };
+
+inline void initializeMetricRigCalibrations(Reconstruction& model, const RigTable* rigs) {
+    if (!rigs) return;
+    model.rigs.resize(rigs->rigs.size());
+    for (size_t r = 0; r < rigs->rigs.size(); r++) {
+        const RigSpec& spec = rigs->rigs[r];
+        RigCalib& calib = model.rigs[r];
+        for (size_t m = 0; m < spec.members.size(); m++)
+            if (spec.members[m].has_ext && spec.members[m].ext_fixed) {
+                calib.ref = (int)m;
+                break;
+            }
+        if (calib.ref < 0) continue;
+        calib.resize(spec.members.size());
+        const Pose base = invertPose(spec.members[(size_t)calib.ref].ext);
+        for (size_t m = 0; m < spec.members.size(); m++) {
+            const RigMemberDef& member = spec.members[m];
+            if (!member.has_ext) continue;
+            calib.cam_from_rig[m] = composePose(member.ext, base);
+            if (member.ext_fixed) calib.established[m] = calib.fixed[m] = 1;
+        }
+    }
+}
 
 inline std::vector<Reconstruction> buildGlobalReconstructions(
     const MatchesDatabase& db, const std::vector<FeatureSet>& features,
@@ -40,7 +64,8 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
     stats = {};
     const size_t n = db.images.size();
     if (features.size() != n || camera_ids.size() != n ||
-        !(opt.max_initial_angle > 0) || !(opt.min_triangulation_angle >= 0))
+        !(opt.max_initial_angle > 0 && opt.max_initial_angle <= 1.5707963267948966) ||
+        !(opt.min_triangulation_angle >= 0 && opt.min_triangulation_angle <= 3.141592653589793))
         throw std::invalid_argument("global reconstruction: invalid inputs");
     std::vector<Camera> cameras(n);
     for (size_t i = 0; i < n; i++) {
@@ -51,7 +76,8 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
         cameras[i].pixel_scale = features[i].pixelScale();
     }
     const auto edges = buildRelativeViewGraph(db, features, cameras, opt.relative);
-    const auto rotations = averageViewRotations(db, edges, opt.rotation);
+    const auto rotations = averageRigViewRotations(db, edges, opt.rigs, opt.rotation);
+    const FixedRigFrames rig_frames = fixedRigFrames(n, opt.rigs);
     stats.rotation_converged = rotations.converged;
     for (uint8_t b : rotations.accepted) stats.edges += b;
     const auto tracks = buildGlobalTracks(db, features, edges, 3, &rotations.accepted);
@@ -68,6 +94,10 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
             const size_t a = root(n + t), b = root(tracks.observations[j].image_id);
             if (a != b) parent[b] = a;
         }
+    for (size_t i = 0; i < n; i++) {
+        const size_t a = root(i), b = root(rig_frames.frame[i]);
+        if (a != b) parent[b] = a;
+    }
     std::map<size_t, std::vector<size_t>> groups;
     for (size_t t = 0; t < tracks.size(); t++) groups[root(n + t)].push_back(t);
     std::vector<Reconstruction> models;
@@ -80,10 +110,22 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
         if (image_set.size() < 2) continue;
         std::vector<uint32_t> images(image_set.begin(), image_set.end());
         std::vector<uint32_t> local(n, UINT32_MAX);
-        for (size_t i = 0; i < images.size(); i++) local[images[i]] = (uint32_t)i;
+        std::vector<Vec3> offsets(n);
+        std::map<uint32_t, uint32_t> local_frames;
+        for (uint32_t image : images) {
+            const uint32_t frame = rig_frames.frame[image];
+            auto found = local_frames.find(frame);
+            if (found == local_frames.end())
+                found = local_frames.emplace(frame, (uint32_t)local_frames.size()).first;
+            local[image] = found->second;
+            offsets[image] = mul(transpose(rotations.rotations[image]),
+                                 rig_frames.sensor_from_rig[image].t) * -1.0;
+        }
         GlobalPositionProblem problem;
-        problem.cameras.resize(images.size());
+        problem.cameras.resize(local_frames.size());
         problem.points.resize(group.second.size());
+        std::vector<Vec3> first_offset(local_frames.size());
+        std::vector<uint8_t> seen_offset(local_frames.size(), 0);
         for (size_t p = 0; p < group.second.size(); p++) {
             const size_t t = group.second[p];
             for (size_t j = tracks.offsets[t]; j < tracks.offsets[t + 1]; j++) {
@@ -92,15 +134,24 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
                 const Vec3 ray = cameras[obs.image_id].bearing({kp.x, kp.y}).normalized();
                 const Vec3 world = mul(transpose(rotations.rotations[obs.image_id]), ray);
                 problem.observations.push_back({local[obs.image_id], (uint32_t)p, world,
-                    known_focals.count(camera_ids[obs.image_id]) ? 1.0 : 0.5});
+                    known_focals.count(camera_ids[obs.image_id]) ? 1.0 : 0.5, offsets[obs.image_id]});
+                const uint32_t frame = local[obs.image_id];
+                if (!seen_offset[frame]) {
+                    first_offset[frame] = offsets[obs.image_id];
+                    seen_offset[frame] = 1;
+                } else if ((first_offset[frame] - offsets[obs.image_id]).norm() > 1e-12) {
+                    problem.metric_scale = true;
+                }
             }
         }
+        if (problem.cameras.size() < 2 && !problem.metric_scale) continue;
         initializeGlobalPosition(problem, opt.position.seed);
         const GlobalPositionResult solved = opt.position_solver
             ? opt.position_solver(problem, opt.position)
             : solveGlobalPosition(problem, opt.position);
-        if (!std::isfinite(solved.final_cost) || solved.accepted == 0) continue;
+        if (!std::isfinite(solved.final_cost) || (!solved.accepted && !solved.converged)) continue;
         Reconstruction model;
+        if (problem.metric_scale) initializeMetricRigCalibrations(model, opt.rigs);
         for (size_t i = 0; i < images.size(); i++) {
             const uint32_t id = images[i], cid = camera_ids[id];
             model.cameras[cid] = camera_groups.at(cid);
@@ -111,7 +162,7 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
             image.exif_orientation = features[id].exif_orientation;
             image.registered = true;
             image.pose.R = rotations.rotations[id];
-            image.pose.t = mul(image.pose.R, problem.cameras[i]) * -1.0;
+            image.pose.t = mul(image.pose.R, problem.cameras[local[id]] + offsets[id]) * -1.0;
             image.points2D.reserve(features[id].count());
             for (const Keypoint& kp : features[id].keypoints) image.points2D.push_back({kp.x, kp.y});
             image.point3D_ids.assign(features[id].count(), kInvalidPoint3D);
@@ -123,13 +174,16 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
             std::vector<Vec3> rays;
             for (size_t j = tracks.offsets[t]; j < tracks.offsets[t + 1]; j++) {
                 const TrackElement obs = tracks.observations[j];
-                const Vec3 delta = problem.points[p] - problem.cameras[local[obs.image_id]];
+                const Vec3 delta = problem.points[p] - problem.cameras[local[obs.image_id]] -
+                                   offsets[obs.image_id];
                 if (delta.norm() < 1e-12) continue;
                 const Keypoint& kp = features[obs.image_id].keypoints[obs.point2D_idx];
                 const Vec3 observed = mul(transpose(rotations.rotations[obs.image_id]),
                     cameras[obs.image_id].bearing({kp.x, kp.y}).normalized());
                 const Vec3 actual = delta.normalized();
-                if (observed.dot(actual) < std::cos(opt.max_initial_angle)) continue;
+                const double max_angle = opt.max_initial_angle *
+                    (known_focals.count(camera_ids[obs.image_id]) ? 1.0 : 2.0);
+                if (observed.dot(actual) < std::cos(max_angle)) continue;
                 keep.push_back(obs);
                 rays.push_back(actual);
             }
