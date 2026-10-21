@@ -429,27 +429,33 @@ int run_bench(int argc, char** argv) {
     double full_peak_vram_mb = 0.0;
     if (compare_full) {
         std::printf("Running Full-Resolution Baseline on GPU...\n");
-        engine_reset();
-        set_data_3dgs(hier.num_splats,
-                      bench_ttv(hier.means.data(), {hier.num_splats, 3}),
-                      bench_ttv(hier.quats.data(), {hier.num_splats, 4}),
-                      bench_ttv(hier.scales.data(), {hier.num_splats, 3}),
-                      bench_ttv(hier.opacities.data(), {hier.num_splats, 1}),
-                      bench_ttv(hier.features_dc.data(), {hier.num_splats, 3}),
-                      bench_ttv(hier.features_sh.data(), {hier.num_splats, coeffs, 3}),
-                      hier.sb_lobes);
-        full_peak_vram_mb = (double)(hier.num_splats * bytes_per_splat) / (1024.0 * 1024.0);
+        try {
+            engine_reset();
+            set_data_3dgs(hier.num_splats,
+                          bench_ttv(hier.means.data(), {hier.num_splats, 3}),
+                          bench_ttv(hier.quats.data(), {hier.num_splats, 4}),
+                          bench_ttv(hier.scales.data(), {hier.num_splats, 3}),
+                          bench_ttv(hier.opacities.data(), {hier.num_splats, 1}),
+                          bench_ttv(hier.features_dc.data(), {hier.num_splats, 3}),
+                          bench_ttv(hier.features_sh.data(), {hier.num_splats, coeffs, 3}),
+                          hier.sb_lobes);
+            full_peak_vram_mb = (double)(hier.num_splats * bytes_per_splat) / (1024.0 * 1024.0);
 
-        for (int f = 0; f < num_frames; f++) {
-            auto t0 = std::chrono::steady_clock::now();
-            set_camera_params(W, H, "PINHOLE", "NONE",
-                              bench_ttv(viewmats[(size_t)f].data(), {1, 4, 4}),
-                              bench_ttv(intr.data(), {1, 4}),
-                              bench_ttv(dist.data(), {1, kCameraDistortionParams}));
-            forward_3dgs("3dgs", 0, false, false, 0);
-            backend::device_synchronize();
-            auto t1 = std::chrono::steady_clock::now();
-            full_frame_times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            for (int f = 0; f < num_frames; f++) {
+                auto t0 = std::chrono::steady_clock::now();
+                set_camera_params(W, H, "PINHOLE", "NONE",
+                                  bench_ttv(viewmats[(size_t)f].data(), {1, 4, 4}),
+                                  bench_ttv(intr.data(), {1, 4}),
+                                  bench_ttv(dist.data(), {1, kCameraDistortionParams}));
+                forward_3dgs("3dgs", 0, false, false, 0);
+                backend::device_synchronize();
+                auto t1 = std::chrono::steady_clock::now();
+                full_frame_times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            }
+        } catch (const std::exception& e) {
+            std::printf("  Full-resolution baseline skipped: %s (exceeded VRAM)\n", e.what());
+            full_frame_times.clear();
+            engine_reset();
         }
     }
 
@@ -558,7 +564,7 @@ int run_bench(int argc, char** argv) {
         std::printf("  Total Uploaded Data:     %.2f MB (%.2f MB/frame active)\n",
                     upload_mb, lod_upload_events > 0 ? upload_mb / lod_upload_events : 0.0);
 
-        if (compare_full) {
+        if (compare_full && !full_frame_times.empty()) {
             double full_avg_ms = calc_avg(full_frame_times);
             double full_p95_ms = calc_percentile(full_frame_times, 0.95);
             double full_p99_ms = calc_percentile(full_frame_times, 0.99);
@@ -579,6 +585,9 @@ int run_bench(int argc, char** argv) {
                         "Peak VRAM Allocation", full_peak_vram_mb, lod_peak_vram_mb, vram_saving);
             std::printf("  %-24s %7lld             %7.0f           -%.1f%%\n",
                         "Rendered Splats", (long long)scene_splats, avg_splats, reduction);
+        } else if (compare_full) {
+            std::printf("\nComparison: Full Resolution baseline could not be evaluated (exceeded GPU VRAM).\n");
+            std::printf("  Hierarchical LOD rendered smoothly within configured %.2f MB budget.\n", lod_peak_vram_mb);
         }
     }
 
@@ -595,22 +604,27 @@ int spirula_lod_main(int argc, char** argv) {
         return 2;
     }
 
-    std::string cmd = argv[1];
-    if (cmd == "build") {
-        return run_build(argc - 1, argv + 1);
-    } else if (cmd == "info") {
-        return run_info(argc - 1, argv + 1);
-    } else if (cmd == "export") {
-        return run_export(argc - 1, argv + 1);
-    } else if (cmd == "bench") {
-        return run_bench(argc - 1, argv + 1);
-    } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
-        print_usage();
-        return 0;
-    } else {
-        std::fprintf(stderr, "unknown lod subcommand: %s\n\n", cmd.c_str());
-        print_usage();
-        return 2;
+    try {
+        std::string cmd = argv[1];
+        if (cmd == "build") {
+            return run_build(argc - 1, argv + 1);
+        } else if (cmd == "info") {
+            return run_info(argc - 1, argv + 1);
+        } else if (cmd == "export") {
+            return run_export(argc - 1, argv + 1);
+        } else if (cmd == "bench") {
+            return run_bench(argc - 1, argv + 1);
+        } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
+            print_usage();
+            return 0;
+        } else {
+            std::fprintf(stderr, "unknown lod subcommand: %s\n\n", cmd.c_str());
+            print_usage();
+            return 2;
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
     }
 }
 

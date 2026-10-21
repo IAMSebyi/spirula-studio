@@ -386,7 +386,7 @@ void HierarchyCache::extract_render_splats(
     out_opacities.resize((size_t)total);
     out_dc.resize((size_t)(total * 3));
     if (coeffs > 0) {
-        out_sh.assign((size_t)(total * coeffs * 3), 0.0f);
+        out_sh.resize((size_t)(total * coeffs * 3));
     } else {
         out_sh.clear();
     }
@@ -446,6 +446,9 @@ void HierarchyCache::extract_render_splats(
                     out_quats[(size_t)(dst_idx * 4 + 3)] = 0.0f;
                     out_opacities[(size_t)dst_idx] = -100.0f;
                 }
+                if (coeffs > 0) {
+                    std::fill_n(&out_sh[(size_t)(cursor * coeffs * 3)], (size_t)(item.splat_count * coeffs * 3), 0.0f);
+                }
                 cursor += item.splat_count;
             }
         } else {
@@ -465,6 +468,10 @@ void HierarchyCache::extract_render_splats(
 
                 float sig = sigmoid(sg.opacity) * item.opacity_multiplier;
                 out_opacities[(size_t)dst_idx] = logit(sig);
+
+                if (coeffs > 0) {
+                    std::fill_n(&out_sh[(size_t)(dst_idx * coeffs * 3)], (size_t)(coeffs * 3), 0.0f);
+                }
 
                 cursor++;
             }

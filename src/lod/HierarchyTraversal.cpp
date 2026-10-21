@@ -101,24 +101,25 @@ void extract_frustum_planes(const float m[16], float planes[6][4]) {
 
 }  // namespace
 
-bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16], bool check_far) {
+bool test_aabb_frustum_pinhole_planes(const Aabb3& box, const float planes[6][4], int num_planes) {
     if (!box.valid()) return false;
-
-    float planes[6][4];
-    extract_frustum_planes(view_proj, planes);
-
-    const int num_planes = check_far ? 6 : 5;
     for (int p = 0; p < num_planes; p++) {
-        // Find the p-vertex (point with maximum projection along plane normal)
         float px = (planes[p][0] > 0.0f) ? box.hi[0] : box.lo[0];
         float py = (planes[p][1] > 0.0f) ? box.hi[1] : box.lo[1];
         float pz = (planes[p][2] > 0.0f) ? box.hi[2] : box.lo[2];
 
         if (planes[p][0] * px + planes[p][1] * py + planes[p][2] * pz + planes[p][3] < 0.0f) {
-            return false; // Box is completely outside this plane
+            return false;
         }
     }
     return true;
+}
+
+bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16], bool check_far) {
+    if (!box.valid()) return false;
+    float planes[6][4];
+    extract_frustum_planes(view_proj, planes);
+    return test_aabb_frustum_pinhole_planes(box, planes, check_far ? 6 : 5);
 }
 
 bool test_aabb_equirectangular(const Aabb3& box, const float cam_pos[3], float z_near, float z_far) {
@@ -162,7 +163,21 @@ LodCutResult HierarchyTraversal::select_cut(
     LodCutResult res;
     if (hier.nodes.empty()) return res;
 
-    std::unordered_set<int32_t> next_selected_nodes;
+    std::vector<uint8_t> next_selected_flags(hier.nodes.size(), 0);
+
+    // Pre-extract frustum planes once per frame
+    float planes[6][4];
+    int num_planes = 0;
+    bool has_pinhole_frustum = false;
+    if (view.camera_model != LodCameraModel::Equirectangular) {
+        for (int i = 0; i < 16; i++) {
+            if (view.view_proj[i] != 0.0f) { has_pinhole_frustum = true; break; }
+        }
+        if (has_pinhole_frustum) {
+            extract_frustum_planes(view.view_proj, planes);
+            num_planes = (view.z_far > 0.0f && view.z_far < 1e6f) ? 6 : 5;
+        }
+    }
 
     // BFS/DFS queue: node indices to visit
     std::vector<int32_t> queue;
@@ -184,16 +199,8 @@ LodCutResult HierarchyTraversal::select_cut(
         bool visible = true;
         if (view.camera_model == LodCameraModel::Equirectangular) {
             visible = test_aabb_equirectangular(node.bounds, view.cam_pos, view.z_near, view.z_far);
-        } else {
-            // If view_proj is set (any non-zero element), use pinhole frustum culling
-            bool has_vp = false;
-            for (int i = 0; i < 16; i++) {
-                if (view.view_proj[i] != 0.0f) { has_vp = true; break; }
-            }
-            if (has_vp) {
-                bool check_far = (view.z_far > 0.0f && view.z_far < 1e6f);
-                visible = test_aabb_frustum_pinhole(node.bounds, view.view_proj, check_far);
-            }
+        } else if (has_pinhole_frustum) {
+            visible = test_aabb_frustum_pinhole_planes(node.bounds, planes, num_planes);
         }
 
         if (!visible) {
@@ -205,20 +212,20 @@ LodCutResult HierarchyTraversal::select_cut(
         float error_px = compute_screen_error(node, view);
         res.max_screen_error = std::max(res.max_screen_error, error_px);
 
+        bool was_selected = (_has_prev_selection && nid < (int32_t)_prev_selected_flags.size() &&
+                             _prev_selected_flags[(size_t)nid] != 0);
+
         // Apply hysteresis: if this node was previously selected in the cut,
         // it requires a slightly higher error before expanding to children.
         float effective_threshold = base_threshold;
-        if (!_prev_selected_nodes.empty() && _prev_selected_nodes.count(nid)) {
+        if (was_selected) {
             effective_threshold *= (1.0f + h_band);
         }
 
         bool should_refine = (error_px > effective_threshold) && !node.is_leaf();
 
-        if (cfg.freeze_lod && !_prev_selected_nodes.empty()) {
-            // If freeze_lod is enabled, keep previous selection state
-            if (_prev_selected_nodes.count(nid)) {
-                should_refine = false;
-            }
+        if (cfg.freeze_lod && was_selected) {
+            should_refine = false;
         }
 
         if (should_refine) {
@@ -227,7 +234,7 @@ LodCutResult HierarchyTraversal::select_cut(
             if (node.child_right >= 0) queue.push_back(node.child_right);
         } else {
             // Stop at this node!
-            next_selected_nodes.insert(nid);
+            next_selected_flags[(size_t)nid] = 1;
 
             // Compute transition weight if within transition band
             float opacity_weight = 1.0f;
@@ -267,7 +274,8 @@ LodCutResult HierarchyTraversal::select_cut(
         }
     }
 
-    _prev_selected_nodes = std::move(next_selected_nodes);
+    _prev_selected_flags = std::move(next_selected_flags);
+    _has_prev_selection = true;
     return res;
 }
 
@@ -290,13 +298,24 @@ void HierarchyTraversal::extract_render_splats(
     out_opacities.resize((size_t)total);
     out_dc.resize((size_t)(total * 3));
     if (coeffs > 0) {
-        out_sh.assign((size_t)(total * coeffs * 3), 0.0f);
+        out_sh.resize((size_t)(total * coeffs * 3));
     } else {
         out_sh.clear();
     }
 
+    const size_t num_items = cut.items.size();
+    std::vector<int64_t> item_dst_offsets(num_items);
     int64_t cursor = 0;
-    for (const auto& item : cut.items) {
+    for (size_t i = 0; i < num_items; i++) {
+        item_dst_offsets[i] = cursor;
+        cursor += cut.items[i].is_leaf ? cut.items[i].splat_count : 1;
+    }
+
+#pragma omp parallel for schedule(static)
+    for (int64_t it_idx = 0; it_idx < (int64_t)num_items; it_idx++) {
+        const auto& item = cut.items[(size_t)it_idx];
+        const int64_t dst_base = item_dst_offsets[(size_t)it_idx];
+
         if (item.is_leaf) {
             const int64_t count = item.splat_count;
             const int64_t off = item.splat_offset;
@@ -304,7 +323,7 @@ void HierarchyTraversal::extract_render_splats(
 
             for (int64_t s = 0; s < count; s++) {
                 const int64_t src_idx = off + s;
-                const int64_t dst_idx = cursor + s;
+                const int64_t dst_idx = dst_base + s;
 
                 for (int j = 0; j < 3; j++) {
                     out_means[(size_t)(dst_idx * 3 + j)] = hier.means[(size_t)(src_idx * 3 + j)];
@@ -329,13 +348,12 @@ void HierarchyTraversal::extract_render_splats(
                                 &out_sh[(size_t)(dst_idx * coeffs * 3)]);
                 }
             }
-            cursor += count;
         } else {
             // Summary Gaussian from parent node
             const auto& nd = hier.nodes[(size_t)item.node_index];
             if (item.summary_index >= 0 && item.summary_index < (int32_t)nd.summary.size()) {
                 const auto& sg = nd.summary[(size_t)item.summary_index];
-                const int64_t dst_idx = cursor;
+                const int64_t dst_idx = dst_base;
 
                 for (int j = 0; j < 3; j++) {
                     out_means[(size_t)(dst_idx * 3 + j)] = sg.mean[j];
@@ -350,7 +368,9 @@ void HierarchyTraversal::extract_render_splats(
                 out_opacities[(size_t)dst_idx] = logit(sig);
 
                 // Summary Gaussians have zero higher-order SH to avoid high-frequency ringing at low detail.
-                cursor++;
+                if (coeffs > 0) {
+                    std::fill_n(&out_sh[(size_t)(dst_idx * coeffs * 3)], (size_t)(coeffs * 3), 0.0f);
+                }
             }
         }
     }

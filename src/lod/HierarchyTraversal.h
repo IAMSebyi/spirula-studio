@@ -98,16 +98,22 @@ public:
 
     // Reset hysteresis history (e.g. on camera cut/teleport)
     void reset_history() {
-        _prev_selected_nodes.clear();
+        _prev_selected_flags.clear();
+        _has_prev_selection = false;
     }
 
-    const std::unordered_set<int32_t>& prev_selected_nodes() const {
-        return _prev_selected_nodes;
+    bool is_node_previously_selected(int32_t nid) const {
+        if (!_has_prev_selection || nid < 0 || (size_t)nid >= _prev_selected_flags.size()) return false;
+        return _prev_selected_flags[(size_t)nid] != 0;
     }
 
 private:
-    std::unordered_set<int32_t> _prev_selected_nodes;
+    std::vector<uint8_t> _prev_selected_flags;
+    bool _has_prev_selection = false;
 };
+
+// Helper: tests if AABB is inside or intersects frustum with precomputed planes.
+bool test_aabb_frustum_pinhole_planes(const Aabb3& box, const float planes[6][4], int num_planes);
 
 // Helper: tests if AABB is inside or intersects frustum.
 bool test_aabb_frustum_pinhole(const Aabb3& box, const float view_proj[16], bool check_far = false);

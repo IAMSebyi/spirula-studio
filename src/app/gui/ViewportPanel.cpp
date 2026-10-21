@@ -1642,18 +1642,19 @@ void ViewportPanel::draw_controls(bool engine) {
             };
             float w_lod = check_raw_w("LOD") + st.ItemSpacing.x;
             if (_lod_cfg.enabled) {
-                w_lod += px(70.0f) + check_raw_w("Levels") + 2.0f * st.ItemSpacing.x;
+                w_lod += px(80.0f) + check_raw_w("Levels") + 2.0f * st.ItemSpacing.x;
             }
             place_group(w_lod);
             place(check_raw_w("LOD"));
             if (ui::CheckboxRaw("LOD##lod_on", &_lod_cfg.enabled)) _dirty = true;
             ui::help_on_hover_raw("Toggle hierarchical level-of-detail rendering");
             if (_lod_cfg.enabled) {
-                place(px(70.0f));
-                ImGui::SetNextItemWidth(px(70.0f));
-                if (ui::SliderFloatRaw("##lod_qual", &_lod_cfg.quality_threshold, 0.5f, 10.0f, "%.1f px"))
+                place(px(80.0f));
+                ImGui::SetNextItemWidth(px(80.0f));
+                if (ui::SliderFloatRaw("##lod_qual", &_lod_cfg.quality_threshold, 0.5f, 200.0f, "%.1f px",
+                                       ImGuiSliderFlags_Logarithmic))
                     _dirty = true;
-                ui::help_on_hover_raw("LOD screen-space error threshold in pixels (smaller = higher quality)");
+                ui::help_on_hover_raw("LOD screen-space error threshold in pixels (Ctrl+click to type value; smaller = higher quality)");
                 place(check_raw_w("Levels"));
                 if (ui::CheckboxRaw("Levels##lod_colors", &_lod_cfg.debug_colorize_levels))
                     _dirty = true;
