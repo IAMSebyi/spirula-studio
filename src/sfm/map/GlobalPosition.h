@@ -7,6 +7,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -23,9 +24,19 @@ struct GlobalPositionObservation {
     Vec3 camera_offset;
 };
 
+struct GlobalPositionPrior {
+    uint32_t camera = 0;
+    Vec3 camera_offset;
+    Mat3 A = mat3Identity();
+    Vec3 b;
+    Vec3 sigma{1, 1, 1};
+    double cauchy = 0;
+};
+
 struct GlobalPositionProblem {
     std::vector<Vec3> cameras, points;
     std::vector<GlobalPositionObservation> observations;
+    std::vector<GlobalPositionPrior> position_priors;
     std::vector<double> log_scales;
     bool metric_scale = false;
 };
@@ -42,6 +53,33 @@ struct GlobalPositionResult {
     int iterations = 0, accepted = 0;
     bool converged = false;
 };
+
+inline Vec3 globalPositionPriorResidual(const GlobalPositionPrior& p, const Vec3& camera) {
+    const Vec3 r = mul(p.A, camera + p.camera_offset) - p.b;
+    return {p.sigma.x > 0 ? r.x / p.sigma.x : 0,
+            p.sigma.y > 0 ? r.y / p.sigma.y : 0,
+            p.sigma.z > 0 ? r.z / p.sigma.z : 0};
+}
+
+inline Mat3 globalPositionPriorJacobian(const GlobalPositionPrior& p) {
+    Mat3 out = p.A;
+    const double inv[3] = {p.sigma.x > 0 ? 1.0 / p.sigma.x : 0,
+                           p.sigma.y > 0 ? 1.0 / p.sigma.y : 0,
+                           p.sigma.z > 0 ? 1.0 / p.sigma.z : 0};
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) out[3 * r + c] *= inv[r];
+    return out;
+}
+
+inline double globalPositionPriorCost(double squared, double cauchy, double huber) {
+    if (cauchy > 0) return cauchy * cauchy * std::log1p(squared / (cauchy * cauchy));
+    return bacpu::HuberLoss::cost(squared, huber);
+}
+
+inline double globalPositionPriorWeight(double squared, double cauchy, double huber) {
+    if (cauchy > 0) return 1.0 / (1.0 + squared / (cauchy * cauchy));
+    return bacpu::HuberLoss::weight(squared, huber);
+}
 
 inline void initializeGlobalPosition(GlobalPositionProblem& p, uint32_t seed = 1) {
     std::mt19937 rng(seed);
@@ -65,6 +103,10 @@ inline double globalPositionCost(const GlobalPositionProblem& p, double huber) {
                                               p.cameras[o.camera] + o.camera_offset,
                                               std::exp(p.log_scales[i])).residual;
         cost += 0.5 * o.weight * bacpu::HuberLoss::cost(r.dot(r), huber);
+    }
+    for (const GlobalPositionPrior& q : p.position_priors) {
+        const Vec3 r = globalPositionPriorResidual(q, p.cameras[q.camera]);
+        cost += 0.5 * globalPositionPriorCost(r.dot(r), q.cauchy, huber);
     }
     return cost;
 }
@@ -91,6 +133,7 @@ inline void validateGlobalPosition(const GlobalPositionProblem& p,
     std::vector<Vec3> first_offset(nc);
     std::vector<uint8_t> has_offset(nc, 0);
     bool baseline = false;
+    std::set<uint32_t> metric_prior_cameras;
     auto root = [&](size_t x) {
         while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
         return x;
@@ -112,24 +155,41 @@ inline void validateGlobalPosition(const GlobalPositionProblem& p,
             baseline = true;
         }
     }
+    for (const GlobalPositionPrior& q : p.position_priors) {
+        bool finite_matrix = true;
+        for (double value : q.A) finite_matrix = finite_matrix && std::isfinite(value);
+        const bool active = q.sigma.x > 0 || q.sigma.y > 0 || q.sigma.z > 0;
+        if (q.camera >= nc || !finite(q.camera_offset) || !finite(q.b) || !finite_matrix ||
+            q.sigma.x < 0 || q.sigma.y < 0 || q.sigma.z < 0 || !active ||
+            !std::isfinite(q.sigma.x) || !std::isfinite(q.sigma.y) ||
+            !std::isfinite(q.sigma.z) || q.cauchy < 0 || !std::isfinite(q.cauchy))
+            throw std::invalid_argument("global positioning: invalid position prior");
+        metric_prior_cameras.insert(q.camera);
+    }
     const size_t component = root(0);
     for (size_t i = 1; i < parent.size(); i++)
         if (root(i) != component)
             throw std::invalid_argument("global positioning: disconnected observations");
-    if (p.metric_scale && !baseline)
+    if (p.metric_scale && !baseline && metric_prior_cameras.size() < 2)
         throw std::invalid_argument("global positioning: metric scale has no rig baseline");
+    if (!p.metric_scale && !p.position_priors.empty())
+        throw std::invalid_argument("global positioning: position priors need metric scale");
 }
 
 inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
                                                 const GlobalPositionOptions& opt = {}) {
     validateGlobalPosition(p, opt);
     const size_t nc = p.cameras.size(), np = p.points.size(), no = p.observations.size();
-    const size_t po = 3 * (nc - 1), so = po + 3 * np, dim = so + no;
+    const bool free_camera_gauge = !p.position_priors.empty();
+    const size_t po = 3 * (nc - (free_camera_gauge ? 0 : 1)), so = po + 3 * np, dim = so + no;
     const bool has_offsets = std::any_of(p.observations.begin(), p.observations.end(),
         [](const GlobalPositionObservation& o) { return o.camera_offset.norm() > 0; });
     auto get = [](const std::vector<double>& v, size_t i) { return Vec3{v[i], v[i + 1], v[i + 2]}; };
     auto add = [](std::vector<double>& v, size_t i, const Vec3& x) {
         v[i] += x.x; v[i + 1] += x.y; v[i + 2] += x.z;
+    };
+    auto camera_offset = [&](uint32_t camera) {
+        return free_camera_gauge ? 3 * (size_t)camera : 3 * ((size_t)camera - 1);
     };
     auto dot = [](const std::vector<double>& a, const std::vector<double>& b) {
         double value = 0;
@@ -154,6 +214,10 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
                                      std::exp(trial_scales[i]);
             value += 0.5 * o.weight * bacpu::HuberLoss::cost(r.dot(r), opt.huber);
         }
+        for (const GlobalPositionPrior& q : p.position_priors) {
+            const Vec3 r = globalPositionPriorResidual(q, trial_cameras[q.camera]);
+            value += 0.5 * globalPositionPriorCost(r.dot(r), q.cauchy, opt.huber);
+        }
         return value;
     };
     for (int iteration = 0; iteration < opt.max_iterations; iteration++) {
@@ -171,13 +235,25 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
             const size_t pi = po + 3 * (size_t)o.point;
             add(rhs, pi, residual * ws);
             for (int k = 0; k < 3; k++) diag[pi + k] += diagonal;
-            if (o.camera) {
-                const size_t ci = 3 * ((size_t)o.camera - 1);
+            if (free_camera_gauge || o.camera) {
+                const size_t ci = camera_offset(o.camera);
                 add(rhs, ci, residual * -ws);
                 for (int k = 0; k < 3; k++) diag[ci + k] += diagonal;
             }
             rhs[so + i] = ws * delta[i].dot(residual);
             diag[so + i] = diagonal * delta[i].dot(delta[i]);
+        }
+        for (const GlobalPositionPrior& q : p.position_priors) {
+            const Mat3 J = globalPositionPriorJacobian(q);
+            const Vec3 residual = globalPositionPriorResidual(q, p.cameras[q.camera]);
+            const double weight = globalPositionPriorWeight(residual.dot(residual), q.cauchy, opt.huber);
+            const size_t ci = camera_offset(q.camera);
+            add(rhs, ci, mul(transpose(J), residual) * -weight);
+            for (int c = 0; c < 3; c++) {
+                double d = 0;
+                for (int r = 0; r < 3; r++) d += J[3 * r + c] * J[3 * r + c];
+                diag[ci + c] += weight * d;
+            }
         }
         for (size_t i = 0; i < dim; i++) damping_diag[i] = std::max(diag[i], 1e-8);
         auto multiply = [&](const std::vector<double>& x, std::vector<double>& y) {
@@ -186,11 +262,18 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
                 const auto& o = p.observations[i];
                 const size_t pi = po + 3 * (size_t)o.point;
                 Vec3 step = get(x, pi) * -1.0 - delta[i] * x[so + i];
-                if (o.camera) step = step + get(x, 3 * ((size_t)o.camera - 1));
+                if (free_camera_gauge || o.camera) step = step + get(x, camera_offset(o.camera));
                 const Vec3 jt = step * (weight[i] * scale[i] * scale[i]);
                 add(y, pi, jt * -1.0);
-                if (o.camera) add(y, 3 * ((size_t)o.camera - 1), jt);
+                if (free_camera_gauge || o.camera) add(y, camera_offset(o.camera), jt);
                 y[so + i] -= delta[i].dot(jt);
+            }
+            for (const GlobalPositionPrior& q : p.position_priors) {
+                const Mat3 J = globalPositionPriorJacobian(q);
+                const size_t ci = camera_offset(q.camera);
+                const Vec3 residual = globalPositionPriorResidual(q, p.cameras[q.camera]);
+                const double weight = globalPositionPriorWeight(residual.dot(residual), q.cauchy, opt.huber);
+                add(y, ci, mul(transpose(J), mul(J, get(x, ci))) * weight);
             }
         };
         std::fill(step.begin(), step.end(), 0);
@@ -222,7 +305,8 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
         }
         trial_cameras = p.cameras;
         trial_points = p.points;
-        for (size_t i = 1; i < nc; i++) trial_cameras[i] = trial_cameras[i] + get(step, 3 * (i - 1));
+        for (size_t i = free_camera_gauge ? 0 : 1; i < nc; i++)
+            trial_cameras[i] = trial_cameras[i] + get(step, camera_offset((uint32_t)i));
         for (size_t i = 0; i < np; i++) trial_points[i] = trial_points[i] + get(step, po + 3 * i);
         for (size_t i = 0; i < no; i++)
             trial_scales[i] = std::clamp(p.log_scales[i] +
@@ -237,7 +321,8 @@ inline GlobalPositionResult solveGlobalPosition(GlobalPositionProblem& p,
             double norm = 0;
             for (const Vec3& c : p.cameras) norm += (c - p.cameras[0]).dot(c - p.cameras[0]);
             norm = nc > 1 ? std::sqrt(norm / (nc - 1)) : 0;
-            if (!has_offsets && !p.metric_scale && norm > 1e-12 && std::isfinite(norm)) {
+            if (!has_offsets && !p.metric_scale && !free_camera_gauge && norm > 1e-12 &&
+                std::isfinite(norm)) {
                 const double shift = std::log(norm);
                 bool safe = true;
                 for (double s : p.log_scales) safe = safe && std::abs(s + shift) <= 20;

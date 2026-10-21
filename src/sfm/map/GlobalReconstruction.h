@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "sfm/core/PriorSource.h"
 #include "sfm/map/GlobalPosition.h"
 #include "sfm/map/GlobalTracks.h"
 #include "sfm/map/RotationAverage.h"
@@ -25,6 +26,8 @@ struct GlobalReconstructionOptions {
     FocalGraphOptions focal;
     std::set<uint32_t> fixed_focals;
     const RigTable* rigs = nullptr;
+    const PriorSource* rotation_priors = nullptr;
+    PriorSource* position_priors = nullptr;
     std::function<GlobalPositionResult(GlobalPositionProblem&, const GlobalPositionOptions&)>
         position_solver;
     double max_initial_angle = 0.017453292519943295;
@@ -32,7 +35,8 @@ struct GlobalReconstructionOptions {
 };
 
 struct GlobalReconstructionStats {
-    size_t edges = 0, tracks = 0, conflicting = 0, models = 0, calibrated_focals = 0;
+    size_t edges = 0, rotation_priors = 0, position_priors = 0, tracks = 0, conflicting = 0, models = 0,
+           calibrated_focals = 0;
     bool rotation_converged = false;
 };
 
@@ -85,11 +89,61 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
         cameras[i].pixel_scale = features[i].pixelScale();
     }
     const auto edges = buildRelativeViewGraph(db, features, cameras, opt.relative);
-    const auto rotations = averageRigViewRotations(db, edges, opt.rigs, opt.rotation);
+    RotationAverageResult rotations;
+    if (!opt.rotation_priors) {
+        rotations = averageRigViewRotations(db, edges, opt.rigs, opt.rotation);
+    } else {
+        MatchesDatabase rotation_db;
+        rotation_db.images.resize(n);
+        rotation_db.pairs.reserve(db.pairs.size());
+        std::vector<RelativeViewEdge> rotation_edges;
+        rotation_edges.reserve(edges.size());
+        std::set<std::pair<uint32_t, uint32_t>> visual_pairs;
+        for (size_t i = 0; i < db.pairs.size(); i++) {
+            TwoViewMatches pair;
+            pair.image1 = db.pairs[i].image1;
+            pair.image2 = db.pairs[i].image2;
+            rotation_db.pairs.push_back(std::move(pair));
+            rotation_edges.push_back({edges[i].pose, edges[i].inliers, {}, edges[i].status});
+            if (edges[i].status == RelativeViewStatus::Accepted)
+                visual_pairs.emplace(std::min(db.pairs[i].image1, db.pairs[i].image2),
+                                     std::max(db.pairs[i].image1, db.pairs[i].image2));
+        }
+        std::set<std::pair<uint32_t, uint32_t>> added;
+        for (uint32_t i = 0; i < n; i++)
+            for (uint32_t j : opt.rotation_priors->neighbours(i)) {
+                if (j >= n || i == j) continue;
+                const std::pair<uint32_t, uint32_t> key{std::min(i, j), std::max(i, j)};
+                if (visual_pairs.count(key) || !added.emplace(key).second) continue;
+                Mat3 R;
+                double sigma;
+                if (!opt.rotation_priors->relativeRotation(key.first, key.second, R, sigma) ||
+                    !(sigma > 0) || !std::isfinite(sigma))
+                    continue;
+                bool finite = true;
+                for (double value : R) finite = finite && std::isfinite(value);
+                if (!finite) continue;
+                TwoViewMatches pair;
+                pair.image1 = key.first;
+                pair.image2 = key.second;
+                rotation_db.pairs.push_back(std::move(pair));
+                RelativeViewEdge edge;
+                edge.pose.R = R;
+                edge.inliers = 1;
+                edge.status = RelativeViewStatus::Accepted;
+                rotation_edges.push_back(std::move(edge));
+                stats.rotation_priors++;
+            }
+        rotations = averageRigViewRotations(rotation_db, rotation_edges, opt.rigs, opt.rotation);
+    }
     const FixedRigFrames rig_frames = fixedRigFrames(n, opt.rigs);
     stats.rotation_converged = rotations.converged;
-    for (uint8_t b : rotations.accepted) stats.edges += b;
-    const auto tracks = buildGlobalTracks(db, features, edges, 3, &rotations.accepted);
+    std::vector<uint8_t> accepted_edges(edges.size());
+    for (size_t i = 0; i < edges.size(); i++) {
+        accepted_edges[i] = rotations.accepted[i];
+        stats.edges += accepted_edges[i];
+    }
+    const auto tracks = buildGlobalTracks(db, features, edges, 3, &accepted_edges);
     stats.tracks = tracks.size();
     stats.conflicting = tracks.conflicting;
     std::vector<size_t> parent(n + tracks.size());
@@ -159,6 +213,36 @@ inline std::vector<Reconstruction> buildGlobalReconstructions(
             ? opt.position_solver(problem, opt.position)
             : solveGlobalPosition(problem, opt.position);
         if (!std::isfinite(solved.final_cost) || (!solved.accepted && !solved.converged)) continue;
+        if (opt.position_priors) {
+            std::vector<PosedImage> posed;
+            posed.reserve(images.size());
+            for (uint32_t id : images) {
+                const Vec3 center = problem.cameras[local[id]] + offsets[id];
+                posed.push_back({id, camera_ids[id], {rotations.rotations[id],
+                                                       mul(rotations.rotations[id], center) * -1.0}});
+            }
+            const PosePriors priors = opt.position_priors->factors(posed);
+            GlobalPositionProblem metric = problem;
+            std::set<uint32_t> prior_frames;
+            for (const PriorCentre& q : priors.centres) {
+                if (!q.absolute() || q.img[0] >= n || local[q.img[0]] == UINT32_MAX) continue;
+                metric.position_priors.push_back(
+                    {local[q.img[0]], offsets[q.img[0]], q.A[0], q.b, q.sigma, q.cauchy});
+                prior_frames.insert(local[q.img[0]]);
+            }
+            if (!metric.position_priors.empty() &&
+                (metric.metric_scale || prior_frames.size() >= 2)) {
+                const size_t prior_count = metric.position_priors.size();
+                metric.metric_scale = metric.metric_scale || prior_frames.size() >= 2;
+                const GlobalPositionResult positioned = opt.position_solver
+                    ? opt.position_solver(metric, opt.position)
+                    : solveGlobalPosition(metric, opt.position);
+                if (std::isfinite(positioned.final_cost) &&
+                    (positioned.accepted || positioned.converged))
+                    problem = std::move(metric);
+                stats.position_priors += prior_count;
+            }
+        }
         Reconstruction model;
         if (problem.metric_scale) initializeMetricRigCalibrations(model, opt.rigs);
         for (size_t i = 0; i < images.size(); i++) {

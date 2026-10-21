@@ -8,6 +8,47 @@
 
 using namespace sfm;
 
+static bool checkPositionPriors() {
+    const std::vector<Vec3> cameras = {{5, -3, 2}, {6, -2.8, 2.1}, {5.1, -2, 2.2},
+                                       {5.8, -2.1, 2.3}};
+    GlobalPositionProblem p;
+    p.cameras.resize(cameras.size());
+    p.metric_scale = true;
+    std::mt19937 rng(71);
+    std::uniform_real_distribution<double> xy(3, 7), depth(6, 10);
+    for (uint32_t j = 0; j < 60; j++) {
+        const Vec3 point{xy(rng), xy(rng), depth(rng)};
+        p.points.push_back(point);
+        for (uint32_t i = 0; i < cameras.size(); i++)
+            p.observations.push_back({i, j, (point - cameras[i]).normalized(), 1});
+    }
+    for (uint32_t i = 0; i < cameras.size(); i++)
+        p.position_priors.push_back({i, {}, mat3Identity(), cameras[i], {0.02, 0.02, 0.02}, 3.0});
+    GlobalPositionPrior outlier = p.position_priors[2];
+    outlier.b = outlier.b + Vec3{10, -8, 6};
+    outlier.cauchy = 1.0;
+    p.position_priors.push_back(outlier);
+    initializeGlobalPosition(p, 31);
+    const Vec3 initial = p.cameras[0];
+    GlobalPositionOptions opt;
+    opt.max_iterations = 250;
+    opt.cg_iterations = 200;
+    const GlobalPositionResult result = solveGlobalPosition(p, opt);
+    double error = 0;
+    for (size_t i = 0; i < cameras.size(); i++)
+        error = std::max(error, (p.cameras[i] - cameras[i]).norm());
+    GlobalPositionProblem invalid = p;
+    invalid.position_priors[0].sigma = {};
+    bool rejected = false;
+    try { solveGlobalPosition(invalid, opt); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    const bool ok = result.accepted > 0 && result.final_cost < result.initial_cost * 0.1 && error < 1e-3 &&
+                    (p.cameras[0] - initial).norm() > 1 && rejected;
+    std::printf("metric position priors: %.4g -> %.4g, camera error %.4g, %s\n",
+                result.initial_cost, result.final_cost, error, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static int testGlobalPosition(int, char**) {
     std::vector<Vec3> cameras = {{0, 0, 0}, {1, 0.1, 0.05}, {0.1, 1, 0.1},
                                  {0.8, 0.9, 0.2}, {0.4, -0.3, 0.3}};
@@ -83,7 +124,8 @@ static int testGlobalPosition(int, char**) {
     std::printf("invalid ray: %s, disconnected: %s, cancellation: %s\n",
                 invalid_ray ? "PASS" : "FAIL", disconnected ? "PASS" : "FAIL",
                 cancelled ? "PASS" : "FAIL");
-    return clean_ok && robust_ok && invalid_ray && disconnected && cancelled ? 0 : 1;
+    return clean_ok && robust_ok && invalid_ray && disconnected && cancelled &&
+                   checkPositionPriors() ? 0 : 1;
 }
 
 int main(int argc, char** argv) { return sfmTestMain(argc, argv, testGlobalPosition); }

@@ -1,7 +1,7 @@
 [[vk::push_constant]] cbuffer PC {
     uint nc; uint np; uint no; uint mode;
     float f0; float f1; float f2; float f3;
-    uint u4; uint u5;
+    uint u4; uint u5; uint u6; uint u7;
 };
 
 [[vk::binding(0)]] StructuredBuffer<uint2> obs;
@@ -14,6 +14,11 @@
 [[vk::binding(7)]] RWStructuredBuffer<float> vec;
 [[vk::binding(8)]] RWStructuredBuffer<float4> partial;
 [[vk::binding(9)]] RWStructuredBuffer<float4> cg_state;
+[[vk::binding(10)]] RWStructuredBuffer<uint4> cg_dispatch;
+[[vk::binding(11)]] StructuredBuffer<uint> prior_camera;
+[[vk::binding(12)]] StructuredBuffer<float4> prior;
+[[vk::binding(13)]] StructuredBuffer<uint> prior_ranges;
+[[vk::binding(14)]] StructuredBuffer<uint> prior_adjacency;
 
 groupshared float4 sum64[64];
 
@@ -21,6 +26,18 @@ uint groupIndex(uint3 g) { return g.x + 65535 * g.y; }
 uint dim() { return 3 * (nc + np); }
 uint scaleBase() { return 3 * (nc + np); }
 uint offset(uint slot, uint i) { return slot * dim() + i; }
+uint groupCount(uint count) { return (count + 63) / 64; }
+uint4 dispatchCount(uint count) {
+    return uint4(min(count, 65535), (count + 65534) / 65535, 1, 0);
+}
+void setCgDispatches(bool active) {
+    cg_dispatch[0] = dispatchCount(active ? nc : 0);
+    cg_dispatch[1] = dispatchCount(active ? groupCount(np) : 0);
+    cg_dispatch[2] = dispatchCount(active ? groupCount(dim()) : 0);
+    cg_dispatch[3] = dispatchCount(active ? groupCount(dim()) : 0);
+    cg_dispatch[4] = dispatchCount(active ? groupCount(dim()) : 0);
+    cg_dispatch[5] = dispatchCount(active ? groupCount(dim()) : 0);
+}
 float3 read3(uint i) { return float3(vars[i], vars[i + 1], vars[i + 2]); }
 float3 vec3(uint slot, uint i) {
     return float3(vec[offset(slot, i)], vec[offset(slot, i + 1)], vec[offset(slot, i + 2)]);
@@ -51,6 +68,30 @@ float3 reducedProduct(uint i, float4 ds, float4 rw, float3 diff) {
     if (i != 0 || u4 != 0) diff -= ds.xyz * (wss * dot(ds.xyz, diff) / scaleDiagonal(ds, rw));
     return wss * diff;
 }
+float3 priorResidual(uint i, float3 c) {
+    float4 x = prior[4 * i], y = prior[4 * i + 1], z = prior[4 * i + 2];
+    return float3(dot(x.xyz, c) - x.w, dot(y.xyz, c) - y.w, dot(z.xyz, c) - z.w);
+}
+float priorWeight(float s, float cauchy) {
+    return cauchy > 0 ? 1.0 / (1.0 + s / (cauchy * cauchy)) :
+                         (s <= f0 * f0 ? 1.0 : f0 / sqrt(s));
+}
+float priorCost(float s, float cauchy) {
+    return cauchy > 0 ? cauchy * cauchy * log(1.0 + s / (cauchy * cauchy)) :
+                         (s <= f0 * f0 ? s : 2.0 * f0 * sqrt(s) - f0 * f0);
+}
+float3 priorJTr(uint i, float3 r) {
+    float4 x = prior[4 * i], y = prior[4 * i + 1], z = prior[4 * i + 2];
+    return x.xyz * r.x + y.xyz * r.y + z.xyz * r.z;
+}
+float3 priorDiag(uint i) {
+    float4 x = prior[4 * i], y = prior[4 * i + 1], z = prior[4 * i + 2];
+    return x.xyz * x.xyz + y.xyz * y.xyz + z.xyz * z.xyz;
+}
+float3 priorJTJ(uint i, float3 v) {
+    float4 x = prior[4 * i], y = prior[4 * i + 1], z = prior[4 * i + 2];
+    return priorJTr(i, float3(dot(x.xyz, v), dot(y.xyz, v), dot(z.xyz, v)));
+}
 
 [shader("compute")] [numthreads(64, 1, 1)]
 void gp_linearize(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
@@ -71,32 +112,45 @@ void gp_nodes(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     if (mode == 1 && cg_state[1].x > 0.5) return;
     uint node = groupIndex(gid);
     if (node >= nc) return;
-    float4 acc = float4(0, 0, 0, 0);
+    float3 acc = float3(0, 0, 0), diagonal = float3(0, 0, 0);
     for (uint j = ranges[node] + lid.x; j < ranges[node + 1]; j += 64) {
         uint i = adjacency[j];
         uint2 o = obs[i];
         float4 ds = delta_scale[i], rw = residual_weight[i];
         float ws = rw.w * ds.w;
         if (mode == 0) {
-            acc.xyz += -ws * rw.xyz + scaleRhsCorrection(i, ds, rw);
-            acc.w += ws * ds.w;
+            acc += -ws * rw.xyz + scaleRhsCorrection(i, ds, rw);
+            diagonal += ws * ds.w;
         } else {
             float3 c = vec3(5, 3 * o.x);
             float3 p = vec3(5, 3 * (nc + o.y));
             float3 jt = reducedProduct(i, ds, rw, c - p);
-            acc.xyz += jt;
+            acc += jt;
         }
     }
-    acc = reduce64(acc, lid.x);
+    for (uint j = prior_ranges[node] + lid.x; j < prior_ranges[node + 1]; j += 64) {
+        uint i = prior_adjacency[j];
+        float3 r = priorResidual(i, read3(3 * node));
+        float w = priorWeight(dot(r, r), prior[4 * i + 3].x);
+        if (mode == 0) {
+            acc -= w * priorJTr(i, r);
+            diagonal += w * priorDiag(i);
+        } else {
+            acc += w * priorJTJ(i, vec3(5, 3 * node));
+        }
+    }
+    float3 reduced = reduce64(float4(acc, 0), lid.x).xyz;
+    float3 reduced_diagonal = mode == 0 ? reduce64(float4(diagonal, 0), lid.x).xyz : float3(0, 0, 0);
     if (lid.x != 0) return;
     uint base = 3 * node;
     if (mode == 0) {
-        put3(0, base, node == 0 ? float3(0, 0, 0) : acc.xyz);
-        put3(1, base, node == 0 ? float3(1, 1, 1) : float3(acc.w, acc.w, acc.w));
+        put3(0, base, node == 0 && u6 == 0 ? float3(0, 0, 0) : reduced);
+        put3(1, base, node == 0 && u6 == 0 ? float3(1, 1, 1) : reduced_diagonal);
     } else {
         float3 diag = vec3(1, base);
         float3 x = vec3(5, base);
-        float3 result = (node == 0 ? float3(0, 0, 0) : acc.xyz) + f0 * max(diag, 1e-8) * x;
+        float3 result = (node == 0 && u6 == 0 ? float3(0, 0, 0) : reduced) +
+                        f0 * max(diag, 1e-8) * x;
         put3(6, base, result);
     }
 }
@@ -186,18 +240,25 @@ void gp_reduce(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         v.xy = float2(r * vec[offset(4, i)], r * r);
     } else if (mode == 1 && i < dim()) {
         v.x = vec[offset(5, i)] * vec[offset(6, i)];
-    } else if (mode >= 2 && i < no) {
-        uint2 o = obs[i];
-        uint cb = 3 * o.x, pb = 3 * (nc + o.y), si = scaleBase() + i;
-        float3 c, p;
-        float s;
-        if (mode == 2) {
-            c = read3(cb); p = read3(pb); s = exp(vars[si]);
-        } else {
-            c = vec3(7, cb); p = vec3(7, pb); s = exp(residual_weight[i].x);
+    } else if (mode >= 2) {
+        if (i < no) {
+            uint2 o = obs[i];
+            uint cb = 3 * o.x, pb = 3 * (nc + o.y), si = scaleBase() + i;
+            float3 c, p;
+            float s;
+            if (mode == 2) {
+                c = read3(cb); p = read3(pb); s = exp(vars[si]);
+            } else {
+                c = vec3(7, cb); p = vec3(7, pb); s = exp(residual_weight[i].x);
+            }
+            float n = length(ray[2 * i].xyz - s * (p - c - ray[2 * i + 1].xyz));
+            v.x += 0.5 * ray[2 * i].w * (n <= f0 ? n * n : 2 * f0 * n - f0 * f0);
         }
-        float n = length(ray[2 * i].xyz - s * (p - c - ray[2 * i + 1].xyz));
-        v.x = 0.5 * ray[2 * i].w * (n <= f0 ? n * n : 2 * f0 * n - f0 * f0);
+        if (i < u7) {
+            float3 c = mode == 2 ? read3(3 * prior_camera[i]) : vec3(7, 3 * prior_camera[i]);
+            float3 r = priorResidual(i, c);
+            v.x += 0.5 * priorCost(dot(r, r), prior[4 * i + 3].x);
+        }
         if (mode == 3 && i == 0) v.y = cg_state[1].w;
     }
     v = reduce64(v, lid.x);
@@ -230,4 +291,5 @@ void gp_cg_scalar(uint3 lid : SV_GroupThreadID) {
             cg_state[0].x = v.x;
         }
     }
+    setCgDispatches(cg_state[1].x <= 0.5);
 }

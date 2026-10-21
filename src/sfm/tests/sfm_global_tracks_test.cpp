@@ -21,7 +21,11 @@ static int testGlobalTracks(int, char**) {
                         {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}}});
     db.pairs.push_back({0, 2, (int)TwoViewConfig::Uncalibrated, {{1, 0}}});
     std::vector<RelativeViewEdge> edges(3);
-    for (RelativeViewEdge& e : edges) e.status = RelativeViewStatus::Accepted;
+    for (RelativeViewEdge& e : edges) {
+        e.status = RelativeViewStatus::Accepted;
+        e.inliers = 100;
+    }
+    edges[2].inliers = 1;
     edges[0].match_mask = {0b11011};
     edges[1].match_mask = {0b10111};
     edges[2].match_mask = {1};
@@ -32,16 +36,26 @@ static int testGlobalTracks(int, char**) {
         std::printf("%s: %s\n", name, ok ? "PASS" : "FAIL");
         failures += !ok;
     };
-    check(tracks.size() == 3 && tracks.conflicting == 1 && tracks.observations.size() == 7,
+    check(tracks.size() == 5 && tracks.conflicting == 1 && tracks.observations.size() == 13,
           "connected tracks and conflicts");
-    bool has_three_view = false, has_short_12 = false, has_short_01 = false;
+    bool has_three_view = false, has_split_zero = false, has_split_one = false;
+    bool has_short_12 = false, has_short_01 = false;
     for (size_t t = 0; t < tracks.size(); t++) {
         const size_t begin = tracks.offsets[t], end = tracks.offsets[t + 1];
         if (end - begin == 3) {
             has_three_view = true;
+            bool zero = true, one = true;
             for (size_t i = begin; i < end; i++)
                 has_three_view = has_three_view && tracks.observations[i].image_id == i - begin &&
                                  tracks.observations[i].point2D_idx == 4;
+            for (size_t i = begin; i < end; i++) {
+                zero = zero && tracks.observations[i].image_id == i - begin &&
+                       tracks.observations[i].point2D_idx == 0;
+                one = one && tracks.observations[i].image_id == i - begin &&
+                      tracks.observations[i].point2D_idx == 1;
+            }
+            has_split_zero = has_split_zero || zero;
+            has_split_one = has_split_one || one;
         } else if (end - begin == 2) {
             const auto& a = tracks.observations[begin];
             const auto& b = tracks.observations[begin + 1];
@@ -52,8 +66,9 @@ static int testGlobalTracks(int, char**) {
         }
     }
     check(has_three_view && has_short_12 && has_short_01, "inlier masks and observation indices");
+    check(has_split_zero && has_split_one, "split conflict retains both long tracks");
     const GlobalTracks longer = buildGlobalTracks(db, features, edges, 3);
-    check(longer.size() == 1 && longer.conflicting == 1 && longer.too_short == 2,
+    check(longer.size() == 3 && longer.conflicting == 1 && longer.too_short == 2,
           "minimum views");
     edges[2].status = RelativeViewStatus::NoPose;
     const GlobalTracks no_conflict = buildGlobalTracks(db, features, edges, 3);

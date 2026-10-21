@@ -16,17 +16,22 @@ namespace {
 
 struct UInt2 { uint32_t x, y; };
 struct Float4 { float x, y, z, w; };
+struct DispatchCommand { uint32_t x, y, z, pad; };
 
 class PositionGpu {
 public:
     PositionGpu(const GlobalPositionProblem& p, int device, const std::string& selector)
         : nc_((uint32_t)p.cameras.size()), np_((uint32_t)p.points.size()),
           no_((uint32_t)p.observations.size()), nodes_(nc_ + np_),
-          dim_(3 * nodes_), var_dim_(dim_ + no_), metric_scale_(p.metric_scale) {
+          npr_((uint32_t)p.position_priors.size()), dim_(3 * nodes_), var_dim_(dim_ + no_),
+          metric_scale_(p.metric_scale), free_camera_gauge_(!p.position_priors.empty()) {
         ctx_.init(deviceOnlyOpt(device, selector));
         std::vector<UInt2> obs(no_);
         std::vector<Float4> rays((size_t)no_ * 2);
         std::vector<uint32_t> ranges((size_t)nodes_ + 1, 0);
+        std::vector<uint32_t> prior_cameras(std::max(npr_, 1u));
+        std::vector<Float4> priors((size_t)std::max(npr_, 1u) * 4);
+        std::vector<uint32_t> prior_ranges((size_t)nodes_ + 1, 0);
         std::vector<float> vars(var_dim_);
         for (uint32_t i = 0; i < nc_; i++) put(vars, 3 * i, p.cameras[i]);
         for (uint32_t i = 0; i < np_; i++) put(vars, 3 * (nc_ + i), p.points[i]);
@@ -45,6 +50,28 @@ public:
             ranges[o.camera + 1]++;
             ranges[nc_ + o.point + 1]++;
         }
+        for (uint32_t i = 0; i < npr_; i++) {
+            const GlobalPositionPrior& q = p.position_priors[i];
+            const Mat3 J = globalPositionPriorJacobian(q);
+            const Vec3 offset = mul(J, q.camera_offset);
+            const Vec3 target = {q.sigma.x > 0 ? q.b.x / q.sigma.x - offset.x : 0,
+                                 q.sigma.y > 0 ? q.b.y / q.sigma.y - offset.y : 0,
+                                 q.sigma.z > 0 ? q.b.z / q.sigma.z - offset.z : 0};
+            prior_cameras[i] = q.camera;
+            for (uint32_t row = 0; row < 3; row++) {
+                const double target_row = row == 0 ? target.x : row == 1 ? target.y : target.z;
+                priors[4 * (size_t)i + row] = {(float)J[3 * row], (float)J[3 * row + 1],
+                                                (float)J[3 * row + 2], (float)target_row};
+            }
+            priors[4 * (size_t)i + 3] = {(float)q.cauchy, 0, 0, 0};
+            for (uint32_t row = 0; row < 4; row++) {
+                const Float4 v = priors[4 * (size_t)i + row];
+                if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z) ||
+                    !std::isfinite(v.w))
+                    throw std::invalid_argument("global positioning: position prior exceeds GPU precision");
+            }
+            prior_ranges[q.camera + 1]++;
+        }
         for (float value : vars)
             if (!std::isfinite(value))
                 throw std::invalid_argument("global positioning: parameter exceeds GPU precision");
@@ -54,18 +81,27 @@ public:
             adjacency[cursor[obs[i].x]++] = i;
             adjacency[cursor[nc_ + obs[i].y]++] = i;
         }
-        const uint32_t reductions = groups(std::max(dim_, no_));
+        std::partial_sum(prior_ranges.begin(), prior_ranges.end(), prior_ranges.begin());
+        std::vector<uint32_t> prior_cursor = prior_ranges,
+                              prior_adjacency(std::max(npr_, 1u));
+        for (uint32_t i = 0; i < npr_; i++) prior_adjacency[prior_cursor[prior_cameras[i]]++] = i;
+        const uint32_t reductions = groups(std::max({dim_, no_, npr_}));
         std::vector<VkDeviceSize> bytes = {
             (VkDeviceSize)no_ * sizeof(UInt2), (VkDeviceSize)no_ * 2 * sizeof(Float4),
             (VkDeviceSize)var_dim_ * 4, (VkDeviceSize)no_ * sizeof(Float4),
             (VkDeviceSize)no_ * sizeof(Float4), (VkDeviceSize)(nodes_ + 1) * 4,
             (VkDeviceSize)no_ * 8, (VkDeviceSize)dim_ * 8 * 4,
-            (VkDeviceSize)reductions * sizeof(Float4), 2 * sizeof(Float4)};
+            (VkDeviceSize)reductions * sizeof(Float4), 2 * sizeof(Float4),
+            6 * sizeof(DispatchCommand), (VkDeviceSize)std::max(npr_, 1u) * 4,
+            (VkDeviceSize)std::max(npr_, 1u) * 4 * sizeof(Float4),
+            (VkDeviceSize)(nodes_ + 1) * 4, (VkDeviceSize)std::max(npr_, 1u) * 4};
         std::vector<VkBuffer> handles;
-        for (VkDeviceSize size : bytes) {
+        for (size_t i = 0; i < bytes.size(); i++) {
+            const VkDeviceSize size = bytes[i];
             if (size > ctx_.maxBufferBytes())
                 throw std::length_error("global positioning: GPU buffer exceeds device limit");
-            buffers_.push_back(ctx_.createBuffer(size));
+            const VkBufferUsageFlags usage = i + 1 == bytes.size() ? VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT : 0;
+            buffers_.push_back(ctx_.createBuffer(size, usage));
             handles.push_back(buffers_.back().buf);
         }
         ctx_.createDescriptors(handles);
@@ -75,16 +111,21 @@ public:
         ctx_.loadPipelines(shader, words * 4,
             {"gp_linearize", "gp_nodes", "gp_points", "gp_scale_update", "gp_vector", "gp_reduce",
              "gp_cg_scalar"});
-        const VkContext::UploadItem uploads[] = {
+        std::vector<VkContext::UploadItem> uploads = {
             {&buffers_[0], obs.data(), bytes[0]}, {&buffers_[1], rays.data(), bytes[1]},
             {&buffers_[2], vars.data(), bytes[2]}, {&buffers_[5], ranges.data(), bytes[5]},
-            {&buffers_[6], adjacency.data(), bytes[6]}};
-        ctx_.uploadMany(uploads, sizeof(uploads) / sizeof(uploads[0]));
+            {&buffers_[6], adjacency.data(), bytes[6]}, {&buffers_[13], prior_ranges.data(), bytes[13]}};
+        if (npr_) {
+            uploads.push_back({&buffers_[11], prior_cameras.data(), bytes[11]});
+            uploads.push_back({&buffers_[12], priors.data(), bytes[12]});
+            uploads.push_back({&buffers_[14], prior_adjacency.data(), bytes[14]});
+        }
+        ctx_.uploadMany(uploads.data(), uploads.size());
     }
 
     GlobalPositionResult solve(GlobalPositionProblem& p, const GlobalPositionOptions& opt) {
         GlobalPositionResult result;
-        double cost = reduce(2, no_, (float)opt.huber).x;
+        double cost = reduce(2, std::max(no_, npr_), (float)opt.huber).x;
         if (!std::isfinite(cost)) throw std::runtime_error("global positioning: non-finite GPU cost");
         result.initial_cost = cost;
         double damping = opt.initial_damping;
@@ -108,26 +149,29 @@ public:
             push.f0 = (float)opt.cg_tolerance;
             dispatch(cb, "gp_cg_scalar", 1, push);
             ctx_.barrier(cb);
+            ctx_.indirectBarrier(cb);
             for (int cg = 0; cg < opt.cg_iterations; cg++) {
                 push = base(); push.u3 = 1; push.f0 = (float)damping;
-                dispatch(cb, "gp_nodes", nc_, push);
-                dispatch(cb, "gp_points", groups(np_), push);
+                dispatchIndirect(cb, "gp_nodes", 0, push);
+                dispatchIndirect(cb, "gp_points", 1, push);
                 ctx_.barrier(cb);
                 push = base(); push.u3 = 1; push.u5 = 1;
-                dispatch(cb, "gp_reduce", groups(dim_), push);
+                dispatchIndirect(cb, "gp_reduce", 2, push);
                 ctx_.barrier(cb);
                 dispatch(cb, "gp_cg_scalar", 1, push);
                 ctx_.barrier(cb);
+                ctx_.indirectBarrier(cb);
                 push = base(); push.u3 = 1; push.f0 = (float)damping;
-                dispatch(cb, "gp_vector", groups(dim_), push);
+                dispatchIndirect(cb, "gp_vector", 3, push);
                 ctx_.barrier(cb);
                 push = base(); push.u3 = 0; push.u5 = 1;
-                dispatch(cb, "gp_reduce", groups(dim_), push);
+                dispatchIndirect(cb, "gp_reduce", 4, push);
                 ctx_.barrier(cb);
                 push.u3 = 2;
                 dispatch(cb, "gp_cg_scalar", 1, push);
                 ctx_.barrier(cb);
-                dispatch(cb, "gp_vector", groups(dim_), push);
+                ctx_.indirectBarrier(cb);
+                dispatchIndirect(cb, "gp_vector", 5, push);
                 ctx_.barrier(cb);
             }
             push = base(); push.u3 = 3;
@@ -135,7 +179,7 @@ public:
             push.u3 = 0; push.f0 = (float)damping;
             dispatch(cb, "gp_scale_update", groups(no_), push);
             ctx_.barrier(cb);
-            const Float4 candidate = reduce(cb, 3, no_, (float)opt.huber);
+            const Float4 candidate = reduce(cb, 3, std::max(no_, npr_), (float)opt.huber);
             const double next_cost = candidate.x;
             if (candidate.y != 0) {
                 result.converged = candidate.y == 1;
@@ -182,10 +226,18 @@ private:
     static Vec3 get(const std::vector<float>& v, uint32_t i) {
         return {v[i], v[i + 1], v[i + 2]};
     }
-    Push base() const { Push p; p.u0 = nc_; p.u1 = np_; p.u2 = no_; p.u4 = metric_scale_ ? 1 : 0; return p; }
+    Push base() const {
+        Push p;
+        p.u0 = nc_; p.u1 = np_; p.u2 = no_; p.u4 = metric_scale_ ? 1 : 0;
+        p.u6 = free_camera_gauge_ ? 1 : 0; p.u7 = npr_;
+        return p;
+    }
     void dispatch(VkCommandBuffer cb, const char* entry, uint32_t count, const Push& p) {
         const uint32_t x = std::min(count, 65535u);
         ctx_.dispatch(cb, entry, x, p, (count + 65534u) / 65535u);
+    }
+    void dispatchIndirect(VkCommandBuffer cb, const char* entry, uint32_t slot, const Push& p) {
+        ctx_.dispatchIndirect(cb, entry, buffers_[10], slot * sizeof(DispatchCommand), p);
     }
     Float4 reduce(uint32_t mode, uint32_t count, float parameter) {
         return reduce(ctx_.begin(), mode, count, parameter);
@@ -212,8 +264,8 @@ private:
     }
     VkContext ctx_;
     std::vector<GpuBuffer> buffers_;
-    uint32_t nc_, np_, no_, nodes_, dim_, var_dim_;
-    bool metric_scale_;
+    uint32_t nc_, np_, no_, nodes_, npr_, dim_, var_dim_;
+    bool metric_scale_, free_camera_gauge_;
 };
 
 }  // namespace

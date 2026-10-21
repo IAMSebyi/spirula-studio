@@ -36,7 +36,7 @@ static int testRotationAverage(int, char**) {
                   mul(truth[4], transpose(truth[0]))), 1000);
     add(6, 5, mul(truth[5], transpose(truth[6])), 100);
     RotationAverageOptions opt;
-    opt.huber_radians = 0.025;
+    opt.irls_sigma_radians = 0.025;
     opt.max_error_radians = 0.10;
     const RotationAverageResult result = averageViewRotations(db, edges, opt);
     int failures = 0;
@@ -53,6 +53,17 @@ static int testRotationAverage(int, char**) {
     }
     check(worst < 0.01, "noisy rotations recovered up to gauge");
     check(!result.accepted[bad_edge], "inconsistent relative rotation removed");
+    RotationAverageOptions l1_only = opt;
+    l1_only.irls_iterations = 0;
+    const RotationAverageResult l1_result = averageViewRotations(db, edges, l1_only);
+    double l1_worst = 0;
+    for (int i = 0; i < 5; i++) {
+        const Mat3 expected = mul(truth[i], transpose(truth[0]));
+        l1_worst = std::max(l1_worst,
+                            rotationToAngleAxis(mul(l1_result.rotations[i], transpose(expected))).norm());
+    }
+    check(l1_result.converged && l1_worst < 0.01 && !l1_result.accepted[bad_edge],
+          "L1 ADMM rejects a high-weight outlier");
     check(result.component[0] == 0 && result.component[4] == 0 &&
           result.component[5] == 5 && result.component[6] == 5 &&
           result.component[7] == UINT32_MAX,

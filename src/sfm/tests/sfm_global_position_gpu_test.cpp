@@ -116,6 +116,44 @@ static bool checkRigPositioning() {
     return ok;
 }
 
+static bool checkPositionPriorsGpu() {
+    const std::vector<Vec3> truth = {{4, -2, 1}, {4.9, -1.8, 1.1}, {4.2, -1, 1.2},
+                                     {5, -1.1, 1.3}};
+    GlobalPositionProblem input;
+    input.cameras.resize(truth.size());
+    input.metric_scale = true;
+    std::mt19937 rng(113);
+    std::uniform_real_distribution<double> xy(2, 6), depth(5, 9);
+    for (uint32_t j = 0; j < 60; j++) {
+        const Vec3 point{xy(rng), xy(rng), depth(rng)};
+        input.points.push_back(point);
+        for (uint32_t i = 0; i < truth.size(); i++)
+            input.observations.push_back({i, j, (point - truth[i]).normalized(), 1});
+    }
+    for (uint32_t i = 0; i < truth.size(); i++)
+        input.position_priors.push_back({i, {}, mat3Identity(), truth[i], {0.02, 0.02, 0.02}, 3.0});
+    GlobalPositionPrior outlier = input.position_priors[2];
+    outlier.b = outlier.b + Vec3{10, -8, 6};
+    outlier.cauchy = 1.0;
+    input.position_priors.push_back(outlier);
+    initializeGlobalPosition(input, 41);
+    GlobalPositionProblem cpu = input, gpu = input;
+    GlobalPositionOptions opt;
+    opt.max_iterations = 200;
+    opt.cg_iterations = 200;
+    const auto ref = solveGlobalPosition(cpu, opt);
+    const auto actual = solveGlobalPositionGpu(gpu, opt);
+    double error = 0;
+    for (size_t i = 0; i < truth.size(); i++)
+        error = std::max(error, (gpu.cameras[i] - truth[i]).norm());
+    const bool ok = actual.accepted > 0 && actual.final_cost < actual.initial_cost * 0.1 &&
+                    actual.final_cost < ref.final_cost * 1.1 + 1e-8 && error < 3e-3 &&
+                    (gpu.cameras[0] - input.cameras[0]).norm() > 1;
+    std::printf("GPU metric position priors CPU %.6g, GPU %.6g, camera error %.4g: %s\n",
+                ref.final_cost, actual.final_cost, error, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static bool checkGpuReduction() {
     GlobalPositionProblem input;
     input.cameras = {{0, 0, 0}, {1, -1, 0}};
@@ -228,7 +266,7 @@ static int testGlobalPositionGpu(int, char**) {
     std::printf("long tracks CPU %.6g, GPU %.6g: %s\n", long_ref.final_cost,
                 long_actual.final_cost, long_ok ? "PASS" : "FAIL");
     return checkSingleStep(false) && checkSingleStep(true) && checkRigPositioning() &&
-           checkGpuReduction() && ok && long_ok ? 0 : 1;
+           checkPositionPriorsGpu() && checkGpuReduction() && ok && long_ok ? 0 : 1;
 }
 
 int main(int argc, char** argv) { return sfmTestMain(argc, argv, testGlobalPositionGpu); }

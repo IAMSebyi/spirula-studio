@@ -13,6 +13,65 @@
 
 using namespace sfm;
 
+class RotationPrior final : public PriorSource {
+public:
+    bool has(uint32_t image) const override { return image < 2; }
+    bool relativeRotation(uint32_t i, uint32_t j, Mat3& R, double& sigma) const override {
+        if (i != 0 || j != 1) return false;
+        R = angleAxisToRotation({0.02, -0.03, 0.04});
+        sigma = 0.01;
+        return true;
+    }
+    std::vector<uint32_t> neighbours(uint32_t image) const override {
+        return image < 2 ? std::vector<uint32_t>{1 - image} : std::vector<uint32_t>{};
+    }
+    PosePriors factors(const std::vector<PosedImage>&) override { return {}; }
+};
+
+class AbsolutePositionPrior final : public PriorSource {
+public:
+    explicit AbsolutePositionPrior(std::vector<Vec3> centres) : centres_(std::move(centres)) {}
+    bool has(uint32_t image) const override { return image < centres_.size(); }
+    bool relativeRotation(uint32_t, uint32_t, Mat3&, double&) const override { return false; }
+    std::vector<uint32_t> neighbours(uint32_t) const override { return {}; }
+    PosePriors factors(const std::vector<PosedImage>& images) override {
+        calls++;
+        PosePriors out;
+        for (const PosedImage& image : images) {
+            if (!has(image.image)) continue;
+            PriorCentre q;
+            q.n = 1;
+            q.img[0] = image.image;
+            q.b = centres_[image.image];
+            q.sigma = {0.02, 0.02, 0.02};
+            q.cauchy = 3.0;
+            out.centres.push_back(q);
+        }
+        return out;
+    }
+    int calls = 0;
+
+private:
+    std::vector<Vec3> centres_;
+};
+
+static bool checkRotationPrior(const Camera& camera, const RelativeViewOptions& relative) {
+    MatchesDatabase db;
+    db.images.resize(2);
+    std::vector<FeatureSet> features(2);
+    for (FeatureSet& f : features) {
+        f.width = 1280;
+        f.height = 960;
+    }
+    RotationPrior prior;
+    GlobalReconstructionOptions opt;
+    opt.relative = relative;
+    opt.rotation_priors = &prior;
+    GlobalReconstructionStats stats;
+    const auto models = buildGlobalReconstructions(db, features, {1, 1}, {{1, camera}}, {1}, opt, stats);
+    return models.empty() && stats.rotation_priors == 1 && stats.edges == 0 && stats.rotation_converged;
+}
+
 static bool checkUnknownFocal(const RelativeViewOptions& relative) {
     constexpr uint32_t images = 6, points = 160;
     Camera truth;
@@ -58,6 +117,33 @@ static bool checkUnknownFocal(const RelativeViewOptions& relative) {
     return models.size() == 1 && models[0].numRegistered() == images &&
            models[0].points3D.size() >= 100 &&
            std::abs(models[0].cameras.at(1).focal() / truth.focal() - 1) < 0.05;
+}
+
+static bool checkPositionPrior(const MatchesDatabase& db, const std::vector<FeatureSet>& features,
+                               const std::vector<Pose>& poses, const std::vector<Camera>& cameras,
+                               const RelativeViewOptions& relative, bool gpu) {
+    std::vector<Vec3> centres;
+    centres.reserve(poses.size());
+    for (const Pose& pose : poses) centres.push_back(cameraCenter(pose));
+    AbsolutePositionPrior prior(std::move(centres));
+    GlobalReconstructionOptions opt;
+    opt.relative = relative;
+    opt.position_priors = &prior;
+    if (gpu) opt.position_solver = [](GlobalPositionProblem& problem, const GlobalPositionOptions& options) {
+        return solveGlobalPositionGpu(problem, options);
+    };
+    GlobalReconstructionStats stats;
+    const auto models = buildGlobalReconstructions(db, features,
+        std::vector<uint32_t>(db.images.size(), 1), {{1, cameras[0]}}, {1}, opt, stats);
+    double error = 0;
+    if (models.size() == 1)
+        for (uint32_t i = 0; i < poses.size(); i++)
+            error = std::max(error, (cameraCenter(models[0].images.at(i).pose) - cameraCenter(poses[i])).norm());
+    const bool ok = models.size() == 1 && models[0].numRegistered() == poses.size() && prior.calls == 1 &&
+                    stats.position_priors == poses.size() && error < 0.08;
+    std::printf("position priors%s: %zu models, %d calls, %zu factors, %.5g error\n",
+                gpu ? " Vulkan" : "", models.size(), prior.calls, stats.position_priors, error);
+    return ok;
 }
 
 static bool checkFixedRigReconstruction(const Camera& camera, const RelativeViewOptions& relative,
@@ -278,10 +364,16 @@ static int testGlobalFrontend(int argc, char** argv) {
           "nonconverged positioning with no progress is rejected");
     check(checkFixedRigReconstruction(cameras[0], options, false),
           "global reconstruction preserves fixed rig extrinsics and scale");
+    check(checkRotationPrior(cameras[0], options), "rotation prior enters global averaging");
+    check(checkPositionPrior(db, features, poses, cameras, options, false),
+          "metric position prior enters global positioning");
     check(checkUnknownFocal(options), "global reconstruction calibrates unknown focal");
     if (gpu)
         check(checkFixedRigReconstruction(cameras[0], options, true),
               "Vulkan global reconstruction preserves fixed rig extrinsics and scale");
+    if (gpu)
+        check(checkPositionPrior(db, features, poses, cameras, options, true),
+              "Vulkan metric position prior enters global positioning");
     MatchesDatabase separate = db;
     separate.images.insert(separate.images.end(), db.images.begin(), db.images.end());
     for (const TwoViewMatches& source : db.pairs) {

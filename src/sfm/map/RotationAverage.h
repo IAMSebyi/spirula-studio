@@ -19,10 +19,20 @@ namespace sfm {
 
 struct RotationAverageOptions {
     int max_iterations = 500;
+    int l1_iterations = 5;
+    int irls_iterations = 100;
+    int l1_admm_initial_iterations = 10;
+    int l1_admm_max_iterations = 100;
     int cg_iterations = 1000;
-    double huber_radians = 0.10;
+    double l1_admm_rho = 1.0;
+    double l1_admm_alpha = 1.0;
+    double l1_admm_absolute_tolerance = 1e-4;
+    double l1_admm_relative_tolerance = 1e-2;
+    double l1_step_tolerance = 1e-3;
+    double irls_sigma_radians = 0.08726646259971647;
+    double irls_step_tolerance = 1e-3;
+    double ridge_regularization = 1e-9;
     double max_error_radians = 0.20;
-    double tolerance = 1e-9;
     double cg_tolerance = 1e-6;
 };
 
@@ -70,10 +80,20 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
                                                    const std::vector<RelativeViewEdge>& views,
                                                    const RotationAverageOptions& opt = {}) {
     if (views.size() != db.pairs.size() || db.images.size() >= UINT32_MAX ||
-        opt.max_iterations < 1 || opt.cg_iterations < 1 || !(opt.huber_radians > 0) ||
-        !(opt.max_error_radians > 0) || !(opt.tolerance > 0) || !(opt.cg_tolerance > 0) ||
-        !std::isfinite(opt.huber_radians) || !std::isfinite(opt.max_error_radians) ||
-        !std::isfinite(opt.tolerance) || !std::isfinite(opt.cg_tolerance))
+        opt.max_iterations < 1 || opt.l1_iterations < 0 || opt.irls_iterations < 0 ||
+        opt.l1_iterations + opt.irls_iterations < 1 || opt.l1_admm_initial_iterations < 1 ||
+        opt.l1_admm_max_iterations < opt.l1_admm_initial_iterations || opt.cg_iterations < 1 ||
+        !(opt.l1_admm_rho > 0) || !(opt.l1_admm_alpha > 0) ||
+        !(opt.l1_admm_alpha < 2) || !(opt.l1_admm_absolute_tolerance >= 0) ||
+        !(opt.l1_admm_relative_tolerance >= 0) || !(opt.l1_step_tolerance > 0) ||
+        !(opt.irls_sigma_radians > 0) || !(opt.irls_step_tolerance > 0) ||
+        !(opt.ridge_regularization >= 0) || !(opt.max_error_radians > 0) ||
+        !(opt.cg_tolerance > 0) || !std::isfinite(opt.l1_admm_rho) ||
+        !std::isfinite(opt.l1_admm_alpha) || !std::isfinite(opt.l1_admm_absolute_tolerance) ||
+        !std::isfinite(opt.l1_admm_relative_tolerance) || !std::isfinite(opt.l1_step_tolerance) ||
+        !std::isfinite(opt.irls_sigma_radians) || !std::isfinite(opt.irls_step_tolerance) ||
+        !std::isfinite(opt.ridge_regularization) ||
+        !std::isfinite(opt.max_error_radians) || !std::isfinite(opt.cg_tolerance))
         throw std::invalid_argument("rotation averaging: invalid inputs");
     const uint32_t n = (uint32_t)db.images.size();
     RotationAverageResult out;
@@ -174,7 +194,7 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
             }
         }
         std::vector<Vec3> rhs(n), step(n), residual(n), preconditioned(n), direction(n), product(n);
-        std::vector<double> diagonal(n), edge_weight(views.size());
+        std::vector<double> diagonal(n), unit_weight(views.size(), 1.0);
         std::vector<Mat3> candidate(n);
         auto anchored = [&](uint32_t i) {
             return out.component[i] == UINT32_MAX || out.component[i] == i;
@@ -184,40 +204,45 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
             for (uint32_t i = 0; i < n; i++) sum += a[i].dot(b[i]);
             return sum;
         };
-        auto objective = [&](const std::vector<Mat3>& rotations) {
+        enum class Stage { L1, GemanMcClure };
+        auto objective = [&](const std::vector<Mat3>& rotations, Stage stage) {
             double value = 0;
             for (size_t e : order) {
                 if (!out.accepted[e]) continue;
                 const auto& pair = db.pairs[e];
                 const Vec3 r = rotationToAngleAxis(mul(mul(transpose(rotations[pair.image2]),
                                                            views[e].pose.R), rotations[pair.image1]));
-                const double a = r.norm();
-                value += a <= opt.huber_radians ? 0.5 * a * a :
-                         opt.huber_radians * (a - 0.5 * opt.huber_radians);
+                const double squared = r.dot(r);
+                if (stage == Stage::L1)
+                    value += std::abs(r.x) + std::abs(r.y) + std::abs(r.z);
+                else
+                    value += squared / (squared + opt.irls_sigma_radians * opt.irls_sigma_radians);
             }
             return value;
         };
-        for (int iter = 0; iter < opt.max_iterations; iter++) {
-            cancel::check();
+        auto solveNormal = [&](const std::vector<Vec3>& target, const std::vector<double>& weights) {
             std::fill(rhs.begin(), rhs.end(), Vec3{});
             std::fill(diagonal.begin(), diagonal.end(), 0.0);
             for (size_t e : order) {
                 if (!out.accepted[e]) continue;
                 const auto& p = db.pairs[e];
-                const Vec3 r = rotationToAngleAxis(mul(mul(transpose(out.rotations[p.image2]),
-                                                           views[e].pose.R), out.rotations[p.image1]));
-                const double error = r.norm();
-                const double w = error > opt.huber_radians ? opt.huber_radians / error : 1.0;
-                edge_weight[e] = w;
-                rhs[p.image1] = rhs[p.image1] - r * w;
-                rhs[p.image2] = rhs[p.image2] + r * w;
+                const double w = weights[e];
+                if (!(w > 0) || !std::isfinite(w)) return false;
+                rhs[p.image1] = rhs[p.image1] - target[e] * w;
+                rhs[p.image2] = rhs[p.image2] + target[e] * w;
                 diagonal[p.image1] += w;
                 diagonal[p.image2] += w;
             }
             std::fill(step.begin(), step.end(), Vec3{});
             for (uint32_t i = 0; i < n; i++) {
-                residual[i] = anchored(i) ? Vec3{} : rhs[i];
-                preconditioned[i] = anchored(i) ? Vec3{} : residual[i] * (1.0 / diagonal[i]);
+                if (anchored(i)) {
+                    residual[i] = preconditioned[i] = direction[i] = {};
+                    continue;
+                }
+                const double d = diagonal[i] + opt.ridge_regularization;
+                if (!(d > 0) || !std::isfinite(d)) return false;
+                residual[i] = rhs[i];
+                preconditioned[i] = residual[i] * (1.0 / d);
                 direction[i] = preconditioned[i];
             }
             double rz = dot(residual, preconditioned);
@@ -230,46 +255,166 @@ inline RotationAverageResult averageViewRotations(const MatchesDatabase& db,
                 for (size_t e : order) {
                     if (!out.accepted[e]) continue;
                     const auto& p = db.pairs[e];
-                    const Vec3 v = (direction[p.image2] - direction[p.image1]) * edge_weight[e];
+                    const Vec3 v = (direction[p.image2] - direction[p.image1]) * weights[e];
                     product[p.image1] = product[p.image1] - v;
                     product[p.image2] = product[p.image2] + v;
                 }
-                for (uint32_t i = 0; i < n; i++) if (anchored(i)) product[i] = {};
+                for (uint32_t i = 0; i < n; i++) {
+                    if (anchored(i)) product[i] = {};
+                    else product[i] = product[i] + direction[i] * opt.ridge_regularization;
+                }
                 const double denom = dot(direction, product);
-                if (!(denom > 0) || !std::isfinite(denom)) break;
+                if (!(denom > 0) || !std::isfinite(denom)) return false;
                 const double alpha = rz / denom;
                 for (uint32_t i = 0; i < n; i++) {
                     step[i] = step[i] + direction[i] * alpha;
                     residual[i] = residual[i] - product[i] * alpha;
                 }
-                if (dot(residual, residual) <= opt.cg_tolerance * opt.cg_tolerance * initial) break;
-                for (uint32_t i = 0; i < n; i++)
-                    preconditioned[i] = anchored(i) ? Vec3{} : residual[i] * (1.0 / diagonal[i]);
+                if (dot(residual, residual) <= opt.cg_tolerance * opt.cg_tolerance * initial)
+                    return true;
+                for (uint32_t i = 0; i < n; i++) {
+                    if (anchored(i)) {
+                        preconditioned[i] = {};
+                        continue;
+                    }
+                    const double d = diagonal[i] + opt.ridge_regularization;
+                    preconditioned[i] = residual[i] * (1.0 / d);
+                }
                 const double next = dot(residual, preconditioned);
-                if (!(next > 0) || !std::isfinite(next)) break;
+                if (!(next > 0) || !std::isfinite(next)) return false;
                 const double beta = next / rz;
                 for (uint32_t i = 0; i < n; i++)
                     direction[i] = preconditioned[i] + direction[i] * beta;
                 rz = next;
             }
-            double largest = 0;
-            for (const Vec3& s : step) largest = std::max(largest, s.norm());
-            if (largest < opt.tolerance) return true;
-            const double before = objective(out.rotations);
-            bool improved = false;
+            return std::isfinite(dot(residual, residual));
+        };
+        auto acceptStep = [&](Stage stage, bool& converged) {
+            double sum = 0;
+            size_t count = 0;
+            for (uint32_t i = 0; i < n; i++)
+                if (!anchored(i)) {
+                    sum += step[i].norm();
+                    count++;
+                }
+            const double mean = count ? sum / count : 0;
+            const double tolerance = stage == Stage::L1 ? opt.l1_step_tolerance
+                                                         : opt.irls_step_tolerance;
+            if (mean < tolerance) {
+                converged = true;
+                return true;
+            }
+            const double before = objective(out.rotations, stage);
             for (double scale = 1; scale >= 1.0 / 1024; scale *= 0.5) {
                 for (uint32_t i = 0; i < n; i++)
                     candidate[i] = mul(out.rotations[i], angleAxisToRotation(step[i] * scale));
-                if (objective(candidate) <= before + 1e-15 * std::max(1.0, before)) {
+                if (objective(candidate, stage) <= before + 1e-15 * std::max(1.0, before)) {
                     out.rotations.swap(candidate);
-                    improved = true;
-                    if (largest * scale < opt.tolerance) return true;
-                    break;
+                    converged = mean * scale < tolerance;
+                    return true;
                 }
             }
-            if (!improved) return false;
-        }
-        return false;
+            converged = true;
+            return true;
+        };
+        auto solveL1 = [&]() {
+            std::vector<Vec3> target(views.size()), z(views.size()), z_old(views.size()),
+                dual(views.size());
+            int admm_iterations = opt.l1_admm_initial_iterations;
+            const int iterations = std::min(opt.max_iterations, opt.l1_iterations);
+            for (int iter = 0; iter < iterations; iter++) {
+                cancel::check();
+                std::fill(z.begin(), z.end(), Vec3{});
+                std::fill(dual.begin(), dual.end(), Vec3{});
+                std::vector<Vec3> errors(views.size());
+                size_t constraints = 0;
+                for (size_t e : order) {
+                    if (!out.accepted[e]) continue;
+                    const auto& p = db.pairs[e];
+                    errors[e] = rotationToAngleAxis(mul(mul(transpose(out.rotations[p.image2]),
+                                                               views[e].pose.R), out.rotations[p.image1]));
+                    constraints++;
+                }
+                bool converged = false;
+                for (int admm = 0; admm < admm_iterations; admm++) {
+                    if (admm % 8 == 0) cancel::check();
+                    for (size_t e : order)
+                        if (out.accepted[e]) target[e] = errors[e] + z[e] - dual[e];
+                    if (!solveNormal(target, unit_weight)) return false;
+                    std::swap(z, z_old);
+                    double error_norm = 0, ax_norm = 0, z_norm = 0, primal_squared = 0;
+                    std::fill(residual.begin(), residual.end(), Vec3{});
+                    std::fill(product.begin(), product.end(), Vec3{});
+                    for (size_t e : order) {
+                        if (!out.accepted[e]) continue;
+                        const auto& p = db.pairs[e];
+                        const Vec3 ax = step[p.image2] - step[p.image1];
+                        const Vec3 ax_hat = ax * opt.l1_admm_alpha +
+                            (z_old[e] + errors[e]) * (1.0 - opt.l1_admm_alpha);
+                        auto shrink = [&](double v) {
+                            return std::copysign(std::max(0.0, std::abs(v) - 1.0 / opt.l1_admm_rho), v);
+                        };
+                        z[e] = {shrink(ax_hat.x - errors[e].x + dual[e].x),
+                                shrink(ax_hat.y - errors[e].y + dual[e].y),
+                                shrink(ax_hat.z - errors[e].z + dual[e].z)};
+                        dual[e] = dual[e] + ax_hat - z[e] - errors[e];
+                        const Vec3 primal = ax - z[e] - errors[e];
+                        const Vec3 dual_step = (z[e] - z_old[e]) * opt.l1_admm_rho;
+                        const Vec3 dual_value = dual[e] * opt.l1_admm_rho;
+                        residual[p.image1] = residual[p.image1] - dual_step;
+                        residual[p.image2] = residual[p.image2] + dual_step;
+                        product[p.image1] = product[p.image1] - dual_value;
+                        product[p.image2] = product[p.image2] + dual_value;
+                        error_norm += errors[e].dot(errors[e]);
+                        ax_norm += ax.dot(ax);
+                        z_norm += z[e].dot(z[e]);
+                        primal_squared += primal.dot(primal);
+                    }
+                    const double primal_norm = std::sqrt(primal_squared);
+                    const double dual_norm = std::sqrt(dot(residual, residual));
+                    const double eps_primal = std::sqrt(3.0 * constraints) * opt.l1_admm_absolute_tolerance +
+                        opt.l1_admm_relative_tolerance * std::max({std::sqrt(error_norm), std::sqrt(ax_norm), std::sqrt(z_norm)});
+                    const double eps_dual = std::sqrt(3.0 * n) * opt.l1_admm_absolute_tolerance +
+                        opt.l1_admm_relative_tolerance * std::sqrt(dot(product, product));
+                    if (!std::isfinite(primal_norm) || !std::isfinite(dual_norm) ||
+                        !std::isfinite(eps_primal) || !std::isfinite(eps_dual)) return false;
+                    if (primal_norm <= eps_primal && dual_norm <= eps_dual) {
+                        converged = true;
+                        break;
+                    }
+                }
+                if (!converged && admm_iterations < opt.l1_admm_max_iterations)
+                    admm_iterations = std::min(2 * admm_iterations, opt.l1_admm_max_iterations);
+                bool done = false;
+                if (!acceptStep(Stage::L1, done)) return false;
+                if (done) return true;
+            }
+            return true;
+        };
+        auto solveIrls = [&]() {
+            std::vector<Vec3> target(views.size());
+            std::vector<double> weights(views.size());
+            const int iterations = std::min(opt.max_iterations, opt.irls_iterations);
+            for (int iter = 0; iter < iterations; iter++) {
+                cancel::check();
+                for (size_t e : order) {
+                    if (!out.accepted[e]) continue;
+                    const auto& p = db.pairs[e];
+                    target[e] = rotationToAngleAxis(mul(mul(transpose(out.rotations[p.image2]),
+                                                               views[e].pose.R), out.rotations[p.image1]));
+                    const double squared = target[e].dot(target[e]);
+                    const double denom = squared + opt.irls_sigma_radians * opt.irls_sigma_radians;
+                    weights[e] = opt.irls_sigma_radians * opt.irls_sigma_radians / (denom * denom);
+                }
+                bool done = false;
+                if (!solveNormal(target, weights) || !acceptStep(Stage::GemanMcClure, done)) return false;
+                if (done) return true;
+            }
+            return true;
+        };
+        const bool l1_converged = solveL1();
+        const bool irls_converged = solveIrls();
+        return l1_converged && irls_converged;
     };
     const bool first_converged = solve();
     bool removed = false;
