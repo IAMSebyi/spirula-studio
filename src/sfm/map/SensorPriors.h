@@ -442,6 +442,11 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return positionLocked(img, p);
     }
+    GeoOrigin origin() const override {
+        std::lock_guard<std::mutex> lk(mu_);
+        ensureEnuOrigin();
+        return enu_origin_;
+    }
 
     bool positionError(uint32_t img, const Pose& pose, const GpsFrame& f,
                        double& metres) const override {
@@ -469,7 +474,7 @@ private:
         TelemetryGps g;
         if (!tl.gpsAt(time(img), g)) return false;
         ensureEnuOrigin();
-        p = enuFromGeodetic({{g.lat, g.lon, g.has_alt ? g.alt : 0.0}}, enu_origin_)[0];
+        p = enuFromGeodetic({{g.lat, g.lon, g.has_alt ? g.alt : 0.0}}, enu_origin_.at)[0];
         return true;
     }
 
@@ -732,17 +737,7 @@ private:
 
     void ensureEnuOrigin() const {
         if (enu_origin_ok_) return;
-        std::vector<Geodetic> all;
-        for (const SensorCapture& c : caps_)
-            if (c.timeline && c.timeline->hasGps())
-                for (const TelemetryGps& g : c.timeline->gpsFixes())
-                    all.push_back({g.lat, g.lon, g.has_alt ? g.alt : 0.0});
-        enu_origin_ = Geodetic{};
-        for (const Geodetic& g : all) {
-            enu_origin_.lat_deg += g.lat_deg / (double)all.size();
-            enu_origin_.lon_deg += g.lon_deg / (double)all.size();
-            enu_origin_.alt_m += g.alt_m / (double)all.size();
-        }
+        enu_origin_ = telemetryGeoOrigin(caps_);
         enu_origin_ok_ = true;
     }
 
@@ -784,7 +779,7 @@ private:
     std::vector<SensorGroupState> groups_;
     std::unordered_map<uint64_t, Preintegration> preint_;
     SensorFactorStats stats_;
-    mutable Geodetic enu_origin_;
+    mutable GeoOrigin enu_origin_;
     mutable bool enu_origin_ok_ = false;
     mutable std::mutex mu_;
 };
@@ -799,9 +794,14 @@ public:
                   std::vector<char> level = {}, std::vector<char> no_alt = {})
         : opt_(opt), level_(std::move(level)), no_alt_(std::move(no_alt)) {
         std::vector<Geodetic> g;
-        for (const std::optional<Geodetic>& f : fixes)
-            if (f) g.push_back(*f);
-        const std::vector<Vec3> enu = enuFromGeodetic(g);
+        bool every_alt = true;
+        for (size_t i = 0; i < fixes.size(); i++) {
+            if (!fixes[i]) continue;
+            g.push_back(*fixes[i]);
+            every_alt = every_alt && !noAlt((uint32_t)i);
+        }
+        if (!g.empty()) origin_ = {true, meanGeodetic(g), every_alt ? "exif" : ""};
+        const std::vector<Vec3> enu = enuFromGeodetic(g, origin_.at);
         pos_.resize(fixes.size());
         for (size_t i = 0, k = 0; i < fixes.size(); i++)
             if (fixes[i]) pos_[i] = enu[k++];
@@ -826,6 +826,7 @@ public:
         p = *pos_[img];
         return true;
     }
+    GeoOrigin origin() const override { return origin_; }
     bool declaredUp(uint32_t img, Vec3& u) const override {
         if (level_off_ || img >= level_.size() || !level_[img]) return false;
         u = kLevelErpUp;
@@ -903,6 +904,7 @@ private:
     std::vector<char> no_alt_;
     std::atomic<bool> level_off_{false};
     std::vector<std::optional<Vec3>> pos_;
+    GeoOrigin origin_;
     SensorFactorStats stats_;
     mutable std::mutex mu_;
 };

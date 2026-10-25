@@ -26,8 +26,10 @@ struct GemmParams {
     float    alpha;
     uint32_t x_row_stride;
     uint32_t groups_per_row;
+    float    x_scale;
+    uint32_t _pad0;
 };
-static_assert(sizeof(GemmParams) == 64, "GemmParams layout");
+static_assert(sizeof(GemmParams) == 72, "GemmParams layout");
 
 // Below this many rows the 64x64 tiling has nothing to chew on and a
 // thread-per-K reduction wins. SAM 3 hits this constantly: every MLP head runs
@@ -116,6 +118,7 @@ TileKernels probe_tile_kernels() {
     p.K = (uint32_t)K;
     p.alpha = 1.0f;
     p.x_row_stride = (uint32_t)K;
+    p.x_scale = 1.0f;
     vk::Stream::get().fill(p.x, 0x3f000000u, (uint64_t)M * K * 4);
     vk::Stream::get().fill(p.w, 0x38003800u, (uint64_t)N * K * 2);
 
@@ -151,7 +154,7 @@ const TileKernels& tile_kernels() {
 
 void dispatch_gemm(const Tensor& out, const Tensor& x_in, const Tensor& w_in,
                    const Tensor& bias, const Tensor& residual, Act act, float alpha,
-                   int64_t x_row_stride) {
+                   int64_t x_row_stride, float x_scale) {
     // Weights keep their PyTorch rank in the store; a [Cout, Cin, kh, kw] conv
     // kernel is the same bytes as the [Cout, Cin*kh*kw] matrix this wants.
     const Tensor w = w_in.asMatrix();
@@ -188,6 +191,7 @@ void dispatch_gemm(const Tensor& out, const Tensor& x_in, const Tensor& w_in,
     p.K = (uint32_t)K;
     p.alpha = alpha;
     p.x_row_stride = (uint32_t)(x_row_stride > 0 ? x_row_stride : K);
+    p.x_scale = x_scale;
 
     vk::SpecList spec{(uint32_t)(w.dtype == DType::F16),
                       (uint32_t)(x.dtype == DType::F16),
@@ -289,12 +293,12 @@ void set_coop_matrix_enabled(bool on) {
 }
 
 void linear(const Tensor& out, const Tensor& x, const Tensor& w, const LinearOpts& o) {
-    dispatch_gemm(out, x, w, o.bias, o.residual, o.act, o.alpha, o.x_row_stride);
+    dispatch_gemm(out, x, w, o.bias, o.residual, o.act, o.alpha, o.x_row_stride, o.x_scale);
 }
 
 void matmul_nt(const Tensor& out, const Tensor& a, const Tensor& b, float alpha,
                Act act) {
-    dispatch_gemm(out, a, b, {}, {}, act, alpha, 0);
+    dispatch_gemm(out, a, b, {}, {}, act, alpha, 0, 1.0f);
 }
 
 }  // namespace nn

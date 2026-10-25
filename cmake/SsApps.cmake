@@ -149,9 +149,9 @@ if(SS_BUILD_SAM)
          ${SS_SRC}/app/FrameDecodeFfmpeg.cpp
          ${SS_SRC}/app/FfmpegVideo.cpp
          ${SS_SRC}/app/gui/Subprocess.cpp)
-    list(APPEND SS_TOOL_DEFS SS_TOOL_SAM=1)
+    list(APPEND SS_TOOL_DEFS SS_TOOL_SAM=1 SS_HAVE_BLUR_GPU=1)
     list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/cli/LicenseCli.cpp)
-    list(APPEND SS_TOOL_LIBS ss_sam)
+    list(APPEND SS_TOOL_LIBS ss_sam ss_blur)
     if(SS_ENABLE_PATENTED)
         list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/FrameDecodeVulkan.cpp)
         list(APPEND SS_TOOL_LIBS ss_video)
@@ -171,7 +171,12 @@ if(SS_BUILD_SAM)
     list(APPEND SS_TOOL_DEFS SS_TOOL_GEOMETRY=1)
     list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/DenseProcessing.cpp)
     list(APPEND SS_TOOL_DEFS SS_HAVE_ROMA=1)
-    list(APPEND SS_TOOL_LIBS ss_metric3d ss_moge ss_roma)
+    list(APPEND SS_TOOL_LIBS ss_metric3d ss_moge ss_marigold ss_roma)
+
+    # ---- LPIPS in the eval pass, installed into TrainerCore by Main.cpp ----
+    list(APPEND SS_TOOL_SOURCES ${SS_SRC}/app/EvalLpips.cpp)
+    list(APPEND SS_TOOL_DEFS SS_HAVE_LPIPS=1)
+    list(APPEND SS_TOOL_LIBS ss_lpips)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -365,12 +370,12 @@ if(SS_SEPARATE_TOOLS)
                      ${SS_SRC}/app/cli/sam_extract.cpp ${SS_SRC}/app/FrameExtract.cpp
                      ${SS_SRC}/app/FrameDecodeFfmpeg.cpp ${SS_SRC}/app/FfmpegVideo.cpp
                      ${SS_SRC}/app/gui/Subprocess.cpp ${SS_SRC}/app/cli/LicenseCli.cpp)
-        set(_sam_lib ss_sam ss_license)
+        set(_sam_lib ss_sam ss_blur ss_license)
         if(SS_ENABLE_PATENTED)
             list(APPEND _sam_src ${SS_SRC}/app/FrameDecodeVulkan.cpp)
             list(APPEND _sam_lib ss_video)
         endif()
-        ss_tool_exe(spirula-sam "${_sam_src}" "SS_TOOL_SAM=1" "${_sam_lib}")
+        ss_tool_exe(spirula-sam "${_sam_src}" "SS_TOOL_SAM=1;SS_HAVE_BLUR_GPU=1" "${_sam_lib}")
     endif()
 endif()
 
@@ -410,6 +415,12 @@ add_executable(frame_motion_test
     ${SS_SRC}/app/FrameMotion.cpp
     ${SS_SRC}/app/Pano360.cpp)
 ss_configure_app(frame_motion_test)
+
+# Which chosen frames are left out, and the blur measure behind it: no device.
+add_executable(frame_pick_test
+    ${SS_SRC}/app/tests/frame_pick_test.cpp
+    ${SS_SRC}/app/FrameSharpness.cpp)
+ss_configure_app(frame_pick_test)
 
 add_executable(model_download_test
     ${SS_SRC}/app/tests/model_download_test.cpp
@@ -552,6 +563,12 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/gui/mask/MaskSlideshow.cpp)
     ss_configure_app(mask_doc_test)
 
+    # The frames reel DatasetPrep fills, without FilmReelView.cpp's drawing.
+    set(SS_FILM_REEL_SOURCES
+        ${SS_SRC}/app/gui/FilmReel.cpp
+        ${SS_SRC}/app/gui/Picture.cpp
+        ${SS_SRC}/app/gui/SfmProgress.cpp)
+
     # DatasetPrep's two seams with the mask editor's layer folder, run for
     # real. Built without SS_BUILD_SAM or the video decoder: no model.
     add_executable(dataset_prep_test
@@ -559,6 +576,7 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/gui/DatasetPrep.cpp
         ${SS_SRC}/app/gui/HeifPhoto.cpp
         ${SS_SRC}/app/gui/FrameSelect.cpp
+        ${SS_SRC}/app/gui/PickSheet.cpp
         ${SS_SRC}/app/FrameSharpness.cpp
         ${SS_SRC}/app/FfmpegVideo.cpp
         ${SS_SRC}/app/gui/PrepProgress.cpp
@@ -571,7 +589,8 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/FrameMotion.cpp
         ${SS_SRC}/app/CubeLut.cpp
         ${SS_SRC}/app/LogLuts.cpp
-        ${SS_SRC}/app/Pano360.cpp)
+        ${SS_SRC}/app/Pano360.cpp
+        ${SS_FILM_REEL_SOURCES})
     ss_configure_app(dataset_prep_test)
 
     # Which steps a dataset run reuses and which it redoes, against records
@@ -583,6 +602,7 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/gui/DatasetPrep.cpp
         ${SS_SRC}/app/gui/HeifPhoto.cpp
         ${SS_SRC}/app/gui/FrameSelect.cpp
+        ${SS_SRC}/app/gui/PickSheet.cpp
         ${SS_SRC}/app/FrameSharpness.cpp
         ${SS_SRC}/app/FfmpegVideo.cpp
         ${SS_SRC}/app/gui/PrepProgress.cpp
@@ -594,7 +614,8 @@ if(SS_BUILD_GUI)
         ${SS_SRC}/app/FrameMotion.cpp
         ${SS_SRC}/app/CubeLut.cpp
         ${SS_SRC}/app/LogLuts.cpp
-        ${SS_SRC}/app/Pano360.cpp)
+        ${SS_SRC}/app/Pano360.cpp
+        ${SS_FILM_REEL_SOURCES})
     ss_configure_app(dataset_plan_test)
 endif()
 

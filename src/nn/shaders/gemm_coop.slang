@@ -65,6 +65,10 @@ struct GemmParams {
     float  alpha;
     uint   x_row_stride;   // in elements; == K unless x is a slice of a wider buffer
     uint   groups_per_row; // unused here; keeps the struct byte-identical to gemm.slang
+    // x is multiplied by this before it is rounded to fp16, and the product
+    // divided by it: a range shift for activations past fp16's 65504.
+    float  x_scale;
+    uint   _pad0;
 };
 
 typealias MatA = CoopMat<float16_t, MemoryScope::Subgroup, 16, 16, CoopMatMatrixUse::MatrixA>;
@@ -123,7 +127,7 @@ void gemm_nt_coop(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
     [ForceUnroll] for (uint u = 0; u < MAX_RA; ++u) {
         const uint m = tile_m + u * 16u + load_row;
         ra[u] = (u * 16u < TM && m < p.M)
-                    ? load_elem(p.x, m * p.x_row_stride + load_k, kInputF16 != 0)
+                    ? load_elem(p.x, m * p.x_row_stride + load_k, kInputF16 != 0) * p.x_scale
                     : 0.0f;
     }
 
@@ -148,7 +152,8 @@ void gemm_nt_coop(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
             [ForceUnroll] for (uint u = 0; u < MAX_RA; ++u) {
                 const uint m = tile_m + u * 16u + load_row;
                 ra[u] = (u * 16u < TM && m < p.M)
-                            ? load_elem(p.x, m * p.x_row_stride + k, kInputF16 != 0)
+                            ? load_elem(p.x, m * p.x_row_stride + k, kInputF16 != 0) *
+                                  p.x_scale
                             : 0.0f;
             }
         }
@@ -165,6 +170,7 @@ void gemm_nt_coop(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
     }
 
     // ---- epilogue -------------------------------------------------------
+    const float out_scale = p.alpha / p.x_scale;
     // One fragment at a time through sEpi, where element e of the pad is row
     // e/16, column e%16 of that fragment. Every subgroup runs the same RF*CF
     // iterations, so the workgroup-wide barriers stay uniform.
@@ -179,7 +185,7 @@ void gemm_nt_coop(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID,
                 const uint m = m0 + (e >> 4);
                 const uint n = n0 + (e & 15u);
                 if (m >= p.M || n >= p.N) continue;
-                float v = sEpi[sg * 256u + e] * p.alpha;
+                float v = sEpi[sg * 256u + e] * out_scale;
                 if (kHasBias != 0) v += asfloat(p.bias[n]);
                 if (kHasResidual != 0) v += p.residual[m * p.N + n];
                 p.out[m * p.N + n] = apply_act(v, kAct);
