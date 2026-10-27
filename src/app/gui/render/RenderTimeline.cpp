@@ -414,8 +414,10 @@ void RenderSession::draw_preview_pane() {
     dl->AddRect(a, b, IM_COL32(90, 220, 255, 160));
     const bool hovered = ImGui::IsItemHovered();
     const bool active = ImGui::IsItemActive();
-    ui::help_on_hover(msg::pv_through_hint,
-                      {(long long)_project.output.width, (long long)_project.output.height});
+    // Through mode's caption already is the hint.
+    if (_preview_mode != PreviewMode::Through)
+        ui::help_on_hover(msg::pv_through_hint,
+                          {(long long)_project.output.width, (long long)_project.output.height});
     ImGui::SetCursorScreenPos(ImVec2(a.x, b.y + ImGui::GetStyle().ItemSpacing.y));
     ui::TextDisabled(_preview_mode == PreviewMode::Through ? msg::pv_through_hint : msg::pv_caption,
                      {(long long)_project.output.width, (long long)_project.output.height});
