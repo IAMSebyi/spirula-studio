@@ -117,7 +117,9 @@ bool solve_marker_system(const std::vector<Marker3D>& markers,
                          const MarkerSystemConfig& cfg,
                          Sim3& out_sim) {
     std::map<int, const Marker3D*> by_id;
-    for (const auto& m : markers) by_id[m.id] = &m;
+    for (const auto& m : markers) {
+        if (!by_id.emplace(m.id, &m).second) return false;
+    }
 
     if (cfg.has_three_markers()) {
         const auto it0 = by_id.find(cfg.three_markers.origin_id);
@@ -172,6 +174,52 @@ bool solve_marker_system(const std::vector<Marker3D>& markers,
     }
 
     return false;
+}
+
+Marker3Def suggest_marker_system(const std::vector<Marker3D>& markers, const double up[3]) {
+    Marker3Def out;
+    if (markers.empty()) return out;
+    out.origin_id = markers[0].id;
+    if (markers.size() < 2) return out;
+    out.x_axis_id = markers[1].id;
+    if (markers.size() < 3) return out;
+    size_t a = 0, b = 1, c = 2;
+    double longest = 0;
+    for (size_t i = 0; i < markers.size(); ++i) for (size_t j = i + 1; j < markers.size(); ++j) {
+        double length = 0;
+        for (int k = 0; k < 3; ++k) {
+            const double d = markers[j].center[k] - markers[i].center[k];
+            length += d * d;
+        }
+        if (length > longest) { longest = length; a = i; b = j; }
+    }
+    double area = -1;
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (i == a || i == b) continue;
+        double u[3], v[3];
+        for (int k = 0; k < 3; ++k) {
+            u[k] = markers[b].center[k] - markers[a].center[k];
+            v[k] = markers[i].center[k] - markers[a].center[k];
+        }
+        const double cross[3] = {u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]};
+        const double value = norm3(cross);
+        if (value > area) { area = value; c = i; }
+    }
+    const size_t triangle[3] = {a, b, c};
+    double best = -1e30;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+        if (i == j) continue;
+        MarkerSystemConfig config;
+        config.three_markers.origin_id = markers[triangle[i]].id;
+        config.three_markers.x_axis_id = markers[triangle[j]].id;
+        config.three_markers.xy_plane_id = markers[triangle[3-i-j]].id;
+        Sim3 frame;
+        if (!solve_marker_system(markers, config, frame)) continue;
+        const double score = 4 * (frame.R[6]*up[0] + frame.R[7]*up[1] + frame.R[8]*up[2]) + frame.R[0] + frame.R[4];
+        if (score > best) { best = score; out = config.three_markers; }
+    }
+    if (out.xy_plane_id < 0) out.xy_plane_id = markers[c].id;
+    return out;
 }
 
 bool apply_marker_alignment(const std::string& dataset_dir,

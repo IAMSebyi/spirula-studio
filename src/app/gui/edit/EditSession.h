@@ -15,6 +15,7 @@
 #include "app/gui/edit/ElementGrid.h"
 #include "app/gui/edit/SelectShape.h"
 #include "app/gui/edit/TransformTool.h"
+#include "data/MarkerScan.h"
 
 #include <atomic>
 #include <functional>
@@ -132,7 +133,7 @@ public:
     bool frame_bounds(double centre[3], double& radius) override;
     // A long job is in flight; editing waits for it.
     bool busy() const {
-        return _comp_busy.load() || _save_busy.load() || _attr_busy.load();
+        return _comp_busy.load() || _save_busy.load() || _attr_busy.load() || _marker_busy.load();
     }
     // Give up on it. The worker checks between cells, so this is not instant.
     void cancel_work();
@@ -169,6 +170,11 @@ private:
     void pick_align(float px, float py);
     void marker_align();
     void marker_crop();
+    void marker_detect();
+    void marker_reload();
+    void take_marker_result();
+    void marker_defaults();
+    void draw_marker_overlay(const ViewportOverlay& v, const ViewProjection& camera);
     // Live layer-0 points in saved coordinates, thinned to at most `cap`.
     std::vector<double> saved_points(int64_t cap, bool selected_only,
                                      std::vector<int64_t>* index = nullptr) const;
@@ -271,8 +277,19 @@ private:
     Pick _pick = Pick::None;
     bool _align_yaw = true, _align_centre = true, _corner_to_origin = false;
     float _align_tol = 1.0f;          // x 1% of the model's extent
-    int _marker_origin = 0, _marker_xaxis = 1, _marker_xyplane = 2;
-    float _marker_dist_x = 1.0f, _marker_pad = 0.2f;
+    int _marker_origin = -1, _marker_xaxis = -1, _marker_xyplane = -1;
+    float _marker_dist_x = 0.0f, _marker_pad = 0.2f;
+    spirula::MarkerFamily _marker_family = spirula::MarkerFamily::Auto;
+    float _marker_decimate = 1.0f;
+    std::vector<spirula::Marker3D> _markers;
+    std::string _markers_file, _marker_error;
+    spirula::MarkerDataset _marker_dataset;
+    std::string _marker_status;
+    bool _marker_status_err = false, _marker_show = true;
+    std::thread _marker_worker;
+    std::atomic<bool> _marker_busy{false};
+    std::atomic<int> _marker_done{0}, _marker_total{0};
+    spirula::MarkerScanResult _marker_result;
     bool _levelling_was = false, _levelling_touched = false;
     bool _moved_ever = false;         // the grid is this session's from here on
     struct Centres {

@@ -17,6 +17,7 @@
 #include "data/RoiDocument.h"
 #include "i18n/catalog/Edit.h"
 #include "i18n/catalog/EditTransform.h"
+#include "i18n/catalog/Marker.h"
 
 #include "imgui.h"
 
@@ -24,12 +25,15 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <exception>
 
 namespace msg = spirula::i18n::msg::xform;
 namespace emsg = spirula::i18n::msg::edit;
 using spirula::Sim3;
 using spirula::i18n::Msg;
 namespace align = spirula::align;
+
+namespace mmsg = spirula::i18n::msg::marker;
 
 namespace gui {
 
@@ -512,43 +516,99 @@ void EditSession::pick_align(float px_, float py_) {
     _status_err = false;
 }
 
-static std::string dataset_dir_of(const EditDoc* doc, const std::string& trainer_ds,
-                                  const std::string& dense_ds) {
-    if (doc && !doc->source_path().empty()) {
-        std::filesystem::path p(doc->source_path());
-        if (std::filesystem::is_directory(p)) return p.string();
-        return p.parent_path().string();
+void EditSession::marker_reload() {
+    if (!_doc) return;
+    _marker_dataset = spirula::resolve_marker_dataset(_doc->source_path());
+    if (_doc->dataset()) _marker_dataset.file_from_dataset = {};
+    auto file = spirula::find_markers_file(_doc->source_path());
+    if (file.empty() && !_marker_dataset.directory.empty())
+        file = spirula::find_markers_file(_marker_dataset.directory);
+    std::vector<spirula::Marker3D> loaded;
+    if (!file.empty() && !spirula::load_markers_json(file, loaded)) {
+        _marker_status = spirula::i18n::format(mmsg::marker_read_failed, {file});
+        _marker_status_err = true;
+        return;
     }
-    if (!trainer_ds.empty()) return trainer_ds;
-    if (!dense_ds.empty()) return dense_ds;
-    return {};
+    _markers = std::move(loaded);
+    _markers_file = file;
+    marker_defaults();
+    _marker_status.clear();
+    _marker_status_err = false;
 }
 
-static bool find_markers_json(const std::string& base_dir,
-                              std::vector<spirula::Marker3D>& out) {
-    if (base_dir.empty()) return false;
-    std::filesystem::path p(base_dir);
-    std::filesystem::path cand = p / "markers.json";
-    if (std::filesystem::exists(cand)) return spirula::load_markers_json(cand.string(), out);
-    cand = p.parent_path() / "markers.json";
-    if (std::filesystem::exists(cand)) return spirula::load_markers_json(cand.string(), out);
-    cand = p / "sparse" / "0" / "markers.json";
-    if (std::filesystem::exists(cand)) return spirula::load_markers_json(cand.string(), out);
-    return false;
+void EditSession::marker_detect() {
+    if (!_doc || busy()) return;
+    if (_marker_worker.joinable()) take_marker_result();
+    if (_marker_dataset.directory.empty()) return;
+    const auto context = _marker_dataset;
+    const auto* dataset = _doc->dataset();
+    const auto family = _marker_family;
+    const double decimate = _marker_decimate;
+    _cancel = false;
+    _marker_status.clear();
+    _marker_status_err = false;
+    _marker_error.clear();
+    _marker_result = {};
+    _marker_done = 0;
+    _marker_total = 0;
+    _marker_busy = true;
+    _marker_worker = std::thread([this, dataset, context, family, decimate]() mutable {
+        try {
+            ParsedDataset parsed;
+            if (!dataset) {
+                auto cfg = context.config;
+                cfg.require_image_files = false;
+                parsed = parse_dataset(context.directory, cfg, "");
+                dataset = &parsed;
+            }
+            _marker_result = spirula::scan_markers(*dataset, family, decimate, 4, &_cancel,
+                [this](int done, int total) { _marker_total = total; _marker_done = done; });
+        } catch (const std::exception& e) { _marker_error = e.what(); }
+        _marker_busy = false;
+    });
+}
+
+void EditSession::take_marker_result() {
+    _marker_worker.join();
+    if (_cancel.load() || _marker_result.cancelled) {
+        _marker_status = mmsg::marker_cancelled.get();
+        _marker_status_err = false;
+    } else if (!_marker_error.empty()) {
+        _marker_status = spirula::i18n::format(mmsg::marker_detect_failed, {_marker_error});
+        _marker_status_err = true;
+    } else {
+        auto& result = _marker_result;
+        _marker_status = spirula::i18n::format(mmsg::marker_result,
+            {(long long)result.images, (long long)result.unreadable,
+             (long long)result.observations, (long long)result.markers.size(),
+             spirula::marker_family_name(result.family)});
+        _marker_status_err = result.markers.empty();
+        if (!result.markers.empty()) {
+            const auto file = (std::filesystem::path(_marker_dataset.directory) / "markers.json").string();
+            if (spirula::save_markers_json(file, result.markers)) {
+                _markers = std::move(result.markers);
+                _markers_file = file;
+                marker_defaults();
+            } else {
+                _marker_status = spirula::i18n::format(mmsg::marker_write_failed, {file});
+                _marker_status_err = true;
+            }
+        }
+    }
+    _cancel = false;
+    note(_marker_status);
 }
 
 void EditSession::marker_align() {
     if (!_doc || busy()) return;
-    const std::string dir = dataset_dir_of(_doc.get(), trainer_dataset(), dense_dataset());
-    std::vector<spirula::Marker3D> markers;
-    if (!find_markers_json(dir, markers) || markers.empty()) {
-        _status = msg::marker_not_found.get();
-        _status_err = true;
+    if (_markers.empty()) {
+        _marker_status = msg::marker_not_found.get();
+        _marker_status_err = true;
         return;
     }
 
-    const Sim3 cur = _doc->file_placement();
-    std::vector<spirula::Marker3D> cur_markers = markers;
+    const Sim3 cur = _doc->file_placement() * _marker_dataset.file_from_dataset;
+    std::vector<spirula::Marker3D> cur_markers = _markers;
     for (auto& m : cur_markers) {
         double p[3];
         cur.apply(m.center, p);
@@ -568,30 +628,29 @@ void EditSession::marker_align() {
 
     Sim3 step;
     if (!spirula::solve_marker_system(cur_markers, cfg, step)) {
-        _status = msg::marker_not_found.get();
-        _status_err = true;
+        _marker_status = mmsg::marker_invalid_system.get();
+        _marker_status_err = true;
         return;
     }
 
     place_saved(step, msg::op_marker_align, /*carry=*/true);
-    _status = spirula::i18n::format(msg::marker_aligned,
+    _marker_status = spirula::i18n::format(msg::marker_aligned,
                                     {(long long)std::lround(step.s * 100.0)});
-    _status_err = false;
-    note(_status);
+    _marker_status_err = false;
+    note(_marker_status);
 }
 
 void EditSession::marker_crop() {
     if (!_doc || busy()) return;
-    const std::string dir = dataset_dir_of(_doc.get(), trainer_dataset(), dense_dataset());
-    std::vector<spirula::Marker3D> markers;
-    if (!find_markers_json(dir, markers) || markers.empty()) {
-        _status = msg::marker_not_found.get();
-        _status_err = true;
+    const auto& dir = _marker_dataset.directory;
+    if (_markers.empty()) {
+        _marker_status = msg::marker_not_found.get();
+        _marker_status_err = true;
         return;
     }
 
-    const Sim3 cur = _doc->file_placement();
-    std::vector<spirula::Marker3D> cur_markers = markers;
+    const Sim3 cur = _doc->file_placement() * _marker_dataset.file_from_dataset;
+    std::vector<spirula::Marker3D> cur_markers = _markers;
     for (auto& m : cur_markers) {
         double p[3];
         cur.apply(m.center, p);
@@ -639,9 +698,9 @@ void EditSession::marker_crop() {
         spirula::save_marker_crop_roi(dir, crop_doc, "marker_crop.json", crop_path, err);
     }
 
-    _status = spirula::i18n::format(msg::marker_cropped, {(long long)outside});
-    _status_err = false;
-    note(_status);
+    _marker_status = spirula::i18n::format(msg::marker_cropped, {(long long)outside});
+    _marker_status_err = false;
+    note(_marker_status);
 }
 
 }  // namespace gui

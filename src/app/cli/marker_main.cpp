@@ -5,6 +5,7 @@
 #include "data/MarkerAlign.h"
 #include "data/MarkerCropBox.h"
 #include "data/MarkerDetector.h"
+#include "data/MarkerScan.h"
 #include "data/MarkerTriangulate.h"
 #include "data/SparseEdit.h"
 #include "i18n/catalog/Marker.h"
@@ -46,7 +47,9 @@ void usage() {
     for (const std::string& l : spirula::i18n::wrap(M::usage_about.get(), 80))
         std::fprintf(stderr, "    %s\n", l.c_str());
     std::fprintf(stderr, "\nOptions:\n");
-    help_row("--family 36h10|36h11", "marker dictionary family (default: 36h10)");
+    help_row("--family <type>", M::family_help.get());
+    help_row("--decimate <1..8>", M::marker_decimate_help.get());
+    help_row("--threads <n>", M::threads_help.get());
     help_row("--origin <id>", "tag ID for origin (0, 0, 0)");
     help_row("--x-axis <id>", "tag ID defining the positive X axis");
     help_row("--xy-plane <id>", "tag ID defining the XY plane (+Y side)");
@@ -75,7 +78,7 @@ int spirula_marker_main(int argc, char** argv) {
     }
 
     std::string dataset_dir;
-    MarkerFamily family = MarkerFamily::Tag36h10;
+    MarkerFamily family = MarkerFamily::Auto;
     int origin_id = -1, x_axis_id = -1, xy_plane_id = -1;
     double dist_x = 0.0;
     double pad_xy = 0.10, z_min = -0.05, z_max = 1.00;
@@ -96,8 +99,10 @@ int spirula_marker_main(int argc, char** argv) {
 
         if (a == "--family") {
             const std::string fam = next();
-            if (fam == "36h11" || fam == "tag36h11") family = MarkerFamily::Tag36h11;
-            else family = MarkerFamily::Tag36h10;
+            if (!parse_marker_family(fam, family)) {
+                std::fprintf(stderr, "unknown marker family '%s'\n", fam.c_str());
+                return 2;
+            }
         } else if (a == "--origin") { origin_id = std::atoi(next()); }
         else if (a == "--x-axis") { x_axis_id = std::atoi(next()); }
         else if (a == "--xy-plane") { xy_plane_id = std::atoi(next()); }
@@ -136,28 +141,13 @@ int spirula_marker_main(int argc, char** argv) {
     const ParsedDataset ds = parse_dataset(dataset_dir, dcfg, "");
 
     std::printf("%s\n", spirula::i18n::format(M::detecting_markers, {(long long)ds.image_filenames.size()}).c_str());
-    MarkerDetector detector(family, nthreads, decimate);
-    std::vector<MarkerObservation> observations;
+    auto scan = scan_markers(ds, family, decimate, nthreads);
+    std::vector<Marker3D>& markers = scan.markers;
 
-    for (size_t i = 0; i < ds.image_filenames.size(); i++) {
-        const std::string& p = ds.image_filenames[i];
-        auto dets = detector.detect_file(p);
-        for (const auto& d : dets) {
-            MarkerObservation obs;
-            obs.image_id = (uint32_t)i;
-            obs.image_name = p;
-            obs.det = d;
-            observations.push_back(obs);
-        }
-    }
+    std::printf("%s\n", spirula::i18n::format(M::marker_result,
+        {(long long)scan.images, (long long)scan.unreadable, (long long)scan.observations,
+         (long long)markers.size(), marker_family_name(scan.family)}).c_str());
 
-    std::map<int, int> tag_counts;
-    for (const auto& o : observations) tag_counts[o.det.id]++;
-
-    std::printf("%s\n", spirula::i18n::format(M::detected_summary,
-        {(long long)observations.size(), (long long)ds.image_filenames.size(), (long long)tag_counts.size()}).c_str());
-
-    std::vector<Marker3D> markers = triangulate_markers(observations, ds);
     std::printf("%s\n", spirula::i18n::format(M::triangulated_summary, {(long long)markers.size()}).c_str());
 
     std::printf("--------------------------------------------------------------------------------\n");
@@ -172,7 +162,12 @@ int spirula_marker_main(int argc, char** argv) {
     std::printf("--------------------------------------------------------------------------------\n");
 
     const std::string mjson_path = dataset_dir + "/markers.json";
-    save_markers_json(mjson_path, markers);
+    if (markers.empty()) return 1;
+    if (!save_markers_json(mjson_path, markers)) {
+        std::fprintf(stderr, "%s\n", spirula::i18n::format(M::marker_write_failed,
+            {mjson_path}).c_str());
+        return 1;
+    }
 
     if (action == "detect") return 0;
 

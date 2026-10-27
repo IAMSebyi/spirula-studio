@@ -1,4 +1,4 @@
-// MarkerDetector.h -- detector for AprilTag fiducial markers on host images.
+// MarkerDetector.h -- AprilTag and ArUco detection on host images.
 #pragma once
 
 #include "data/MarkerTypes.h"

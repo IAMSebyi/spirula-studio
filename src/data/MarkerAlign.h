@@ -20,6 +20,9 @@ bool solve_marker_system(const std::vector<Marker3D>& markers,
                          const MarkerSystemConfig& cfg,
                          Sim3& out_sim);
 
+Marker3Def suggest_marker_system(const std::vector<Marker3D>& markers,
+                                 const double up[3]);
+
 // Apply Sim(3) to the dataset's sparse reconstruction on disk and update gauge.txt.
 bool apply_marker_alignment(const std::string& dataset_dir,
                             const Sim3& T,

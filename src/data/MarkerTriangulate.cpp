@@ -162,14 +162,16 @@ double project_error(const ParsedDataset& ds, uint32_t cam_idx, const double pt[
 bool triangulate_marker(int marker_id,
                         const std::vector<MarkerObservation>& obs,
                         const ParsedDataset& ds,
-                        Marker3D& out) {
+                        Marker3D& out, MarkerFamily family) {
     std::vector<const MarkerObservation*> matching;
     for (const auto& o : obs) {
-        if (o.det.id == marker_id) matching.push_back(&o);
+        if (o.det.id == marker_id && (family == MarkerFamily::Auto || o.det.family == family))
+            matching.push_back(&o);
     }
     if (matching.size() < 2) return false;
+    for (const auto* o : matching)
+        if (o->det.family != matching.front()->det.family) return false;
 
-    const int n = (int)matching.size();
     std::vector<double> c_origins, c_dirs;
     std::vector<std::vector<double>> corn_origins(4), corn_dirs(4);
     std::vector<uint32_t> valid_cams;
@@ -195,6 +197,7 @@ bool triangulate_marker(int marker_id,
     if (valid_count < 2) return false;
 
     out.id = marker_id;
+    out.family = matching.front()->det.family;
     out.num_views = valid_count;
 
     if (!intersect_rays(c_origins.data(), c_dirs.data(), valid_count, out.center))
@@ -231,20 +234,21 @@ bool triangulate_marker(int marker_id,
             err_count++;
         }
     }
-    out.reproj_error_px = err_count > 0 ? err_sum / (double)err_count : 0.0;
+    if (err_count < 2 || err_count != valid_count) return false;
+    out.reproj_error_px = err_sum / (double)err_count;
     return true;
 }
 
 std::vector<Marker3D> triangulate_markers(const std::vector<MarkerObservation>& obs,
                                           const ParsedDataset& ds) {
-    std::map<int, int> counts;
-    for (const auto& o : obs) counts[o.det.id]++;
+    std::map<std::pair<MarkerFamily, int>, int> counts;
+    for (const auto& o : obs) counts[{o.det.family, o.det.id}]++;
 
     std::vector<Marker3D> res;
     for (const auto& kv : counts) {
         if (kv.second < 2) continue;
         Marker3D m;
-        if (triangulate_marker(kv.first, obs, ds, m)) {
+        if (triangulate_marker(kv.first.second, obs, ds, m, kv.first.first)) {
             res.push_back(m);
         }
     }
@@ -258,6 +262,7 @@ bool save_markers_json(const std::string& path, const std::vector<Marker3D>& mar
     for (const auto& m : markers) {
         w.object();
         w.field("id", m.id);
+        w.field("family", marker_family_name(m.family));
         w.field("num_views", m.num_views);
         w.field("reproj_error_px", m.reproj_error_px);
         w.key("center").array();
@@ -291,17 +296,26 @@ bool load_markers_json(const std::string& path, std::vector<Marker3D>& markers) 
         const JsonValue root = json_parse_file(path);
         const JsonValue* arr = root.find("markers");
         if (!arr || !arr->is_array()) return false;
-        markers.clear();
+        std::vector<Marker3D> loaded;
         for (const auto& item : arr->arr) {
             Marker3D m;
+            if (const auto* f = item.find("family")) {
+                if (!parse_marker_family(f->as_string(), m.family) || m.family == MarkerFamily::Auto)
+                    return false;
+            }
             const JsonValue* v_id = item.find("id");
-            m.id = v_id ? (int)v_id->as_int(-1) : -1;
+            if (!v_id || v_id->type != JsonValue::Type::Number ||
+                !std::isfinite(v_id->num) || v_id->num < 0 || v_id->num > 65535 ||
+                v_id->num != std::floor(v_id->num)) return false;
+            m.id = (int)v_id->num;
             const JsonValue* v_nv = item.find("num_views");
             m.num_views = v_nv ? (int)v_nv->as_int(0) : 0;
             m.reproj_error_px = item.get_double("reproj_error_px", 0.0);
             const JsonValue* c = item.find("center");
-            if (c && c->is_array() && c->arr.size() == 3) {
-                for (int k = 0; k < 3; k++) m.center[k] = c->arr[k].as_double();
+            if (!c || !c->is_array() || c->arr.size() != 3) return false;
+            for (int k = 0; k < 3; k++) {
+                m.center[k] = c->arr[k].as_double(std::numeric_limits<double>::quiet_NaN());
+                if (!std::isfinite(m.center[k])) return false;
             }
             const JsonValue* norm = item.find("normal");
             if (norm && norm->is_array() && norm->arr.size() == 3) {
@@ -315,9 +329,10 @@ bool load_markers_json(const std::string& path, std::vector<Marker3D>& markers) 
                     }
                 }
             }
-            markers.push_back(m);
+            loaded.push_back(m);
         }
-        return !markers.empty();
+        markers = std::move(loaded);
+        return true;
     } catch (...) {
         return false;
     }

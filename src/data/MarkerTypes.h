@@ -7,10 +7,14 @@
 
 namespace spirula {
 
-enum class MarkerFamily { Tag36h10 = 0, Tag36h11 = 1 };
+enum class MarkerFamily { Auto = -1, Tag36h10 = 0, Tag36h11, Aruco4x4, Aruco5x5, Aruco6x6, Aruco7x7, ArucoOriginal };
+
+const char* marker_family_name(MarkerFamily family);
+bool parse_marker_family(const std::string& name, MarkerFamily& family);
 
 struct MarkerDetection {
     int id = -1;
+    MarkerFamily family = MarkerFamily::Tag36h10;
     double center[2]{0.0, 0.0};
     double corners[4][2]{{0.0, 0.0}};  // CCW: c0, c1, c2, c3
     double hamming = 0.0;
@@ -25,6 +29,7 @@ struct MarkerObservation {
 
 struct Marker3D {
     int id = -1;
+    MarkerFamily family = MarkerFamily::Tag36h10;
     double center[3]{0.0, 0.0, 0.0};
     double corners[4][3]{{0.0, 0.0, 0.0}};
     double normal[3]{0.0, 0.0, 1.0};

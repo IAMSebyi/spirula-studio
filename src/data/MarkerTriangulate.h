@@ -12,7 +12,7 @@ namespace spirula {
 bool triangulate_marker(int marker_id,
                         const std::vector<MarkerObservation>& obs,
                         const ParsedDataset& ds,
-                        Marker3D& out);
+                        Marker3D& out, MarkerFamily family = MarkerFamily::Auto);
 
 // Triangulate all distinct markers found in the observations.
 std::vector<Marker3D> triangulate_markers(const std::vector<MarkerObservation>& obs,
