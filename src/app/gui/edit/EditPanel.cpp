@@ -860,7 +860,6 @@ void EditSession::draw_transform_tab(float full) {
         _dist_scale.draw_panel_ui(step, should_scale);
         if (should_scale) {
             place_saved(step, xmsg::op_scale_distance, /*carry=*/false);
-            _dist_scale.apply_transform(step);
         }
     }
 

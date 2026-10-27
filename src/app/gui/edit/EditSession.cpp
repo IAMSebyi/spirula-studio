@@ -56,7 +56,6 @@ void EditSession::open(std::unique_ptr<EditDoc> doc, ViewportPanel* panel) {
     _pick = Pick::None;
     _dist_scale.set_active(false);
     _dist_scale.reset();
-    _dist_scale.set_active(false);
     _moved_ever = false;
     _levelling_touched = false;
     _saved_over_source = false;
@@ -214,10 +213,9 @@ bool EditSession::on_viewport_input(const ViewportInput& in) {
             if (view(vp)) {
                 const spirula::Sim3 to_saved = _doc->view_frame().inverse() * _doc->placement();
                 const bool consumed = _dist_scale.update(in, vp, *_doc, to_saved,
-                                                         saved_to_shared(), step, should_scale);
+                                                         saved_to_shared() * _dist_scale.preview_step(), step, should_scale);
                 if (should_scale) {
                     place_saved(step, xmsg::op_scale_distance, /*carry=*/false);
-                    _dist_scale.apply_transform(step);
                 }
                 if (consumed) return true;
             }
@@ -270,13 +268,13 @@ void EditSession::draw_viewport_overlay(const ViewportOverlay& v) {
         draw_world_grid(v.dl, origin, f.cam, saved_to_shared(), v.grid_cell, focus);
     }
     if (have && _dist_scale.active()) {
-        _dist_scale.draw_overlay(v.dl, v, f.cam, saved_to_shared());
+        _dist_scale.draw_overlay(v.dl, v, f.cam,
+                                 saved_to_shared() * _dist_scale.preview_step());
         spirula::Sim3 step;
         bool should_scale = false;
         _dist_scale.draw_viewport_toolbar(v, step, should_scale);
         if (should_scale) {
             place_saved(step, xmsg::op_scale_distance, /*carry=*/false);
-            _dist_scale.apply_transform(step);
         }
     } else if (have && _xform.active()) {
         _xform.draw_overlay(v.dl, origin, f);

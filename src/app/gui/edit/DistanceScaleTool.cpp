@@ -41,6 +41,7 @@ void DistanceScaleTool::set_active(bool a) {
 }
 
 void DistanceScaleTool::reset() {
+    _preview = false;
     _has_a = false;
     _has_b = false;
     _hover_point = -1;
@@ -57,7 +58,10 @@ double DistanceScaleTool::measured_distance() const {
 }
 
 void DistanceScaleTool::set_target_distance(float d) {
-    if (d > 0.0f) _target_distance = d;
+    if (d > 0.0f) {
+        _target_distance = d;
+        _preview = true;
+    }
 }
 
 int DistanceScaleTool::hint_state() const {
@@ -80,9 +84,21 @@ bool DistanceScaleTool::hit_surface(const EditDoc& doc, const ViewProjection& vp
     return true;
 }
 
+spirula::Sim3 DistanceScaleTool::preview_step() const {
+    const double d = measured_distance();
+    if (!_active || !_preview || d <= 1e-6 || !std::isfinite(_target_distance) ||
+        _target_distance <= 0.0f) return {};
+    const double pivot[3] = {
+        (_pt_a[0] + _pt_b[0]) * 0.5,
+        (_pt_a[1] + _pt_b[1]) * 0.5,
+        (_pt_a[2] + _pt_b[2]) * 0.5,
+    };
+    return spirula::Sim3::scale_about((double)_target_distance / d, pivot);
+}
+
 void DistanceScaleTool::trigger_scale(spirula::Sim3& out_step, bool& should_scale) {
     const double d = measured_distance();
-    if (_has_a && _has_b && d > 1e-6 && _target_distance > 0.0f) {
+    if (_has_a && _has_b && d > 1e-6 && std::isfinite(_target_distance) && _target_distance > 0.0f) {
         const double factor = (double)_target_distance / d;
         const double pivot[3] = {
             (_pt_a[0] + _pt_b[0]) * 0.5,
@@ -91,12 +107,8 @@ void DistanceScaleTool::trigger_scale(spirula::Sim3& out_step, bool& should_scal
         };
         out_step = spirula::Sim3::scale_about(factor, pivot);
         should_scale = true;
+        set_active(false);
     }
-}
-
-void DistanceScaleTool::apply_transform(const spirula::Sim3& step) {
-    if (_has_a) step.apply(_pt_a, _pt_a);
-    if (_has_b) step.apply(_pt_b, _pt_b);
 }
 
 bool DistanceScaleTool::update(const ViewportInput& in, const ViewProjection& vp,
@@ -113,7 +125,7 @@ bool DistanceScaleTool::update(const ViewportInput& in, const ViewProjection& vp
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
-        if (_has_a && _has_b && _target_distance > 0.0f) {
+        if (_has_a && _has_b && std::isfinite(_target_distance) && _target_distance > 0.0f) {
             trigger_scale(out_step, should_scale);
             return true;
         }
@@ -140,19 +152,25 @@ bool DistanceScaleTool::update(const ViewportInput& in, const ViewProjection& vp
         else if (db < grab_r) _hover_point = 1;
     }
 
+    // A pick is a pass over every element (several on a miss), so the pointer
+    // is picked under once it rests and on a click, not on every frame it moves.
+    const bool moved = std::fabs(in.x - _last_mouse[0]) > 1.0f || std::fabs(in.y - _last_mouse[1]) > 1.0f;
+    _last_mouse[0] = in.x;
+    _last_mouse[1] = in.y;
+    if (moved) _pick_stale = true;
+    auto pick_here = [&] {
+        _hover_surface = hit_surface(doc, vp, in.x, in.y, to_saved, _hover_pos);
+        _pick_stale = false;
+    };
+
     if (_drag_point >= 0) {
-        if (in.down) {
-            double hit_pt[3];
-            if (hit_surface(doc, vp, in.x, in.y, to_saved, hit_pt)) {
-                if (_drag_point == 0) {
-                    for (int k = 0; k < 3; k++) _pt_a[k] = hit_pt[k];
-                } else {
-                    for (int k = 0; k < 3; k++) _pt_b[k] = hit_pt[k];
-                }
-            }
-            return true;
+        if (in.down && (moved || !_pick_stale)) return true;
+        pick_here();
+        if (_hover_surface) {
+            double* pt = _drag_point == 0 ? _pt_a : _pt_b;
+            for (int k = 0; k < 3; k++) pt[k] = _hover_pos[k];
         }
-        _drag_point = -1;
+        if (!in.down) _drag_point = -1;
         return true;
     }
 
@@ -161,15 +179,8 @@ bool DistanceScaleTool::update(const ViewportInput& in, const ViewProjection& vp
         return true;
     }
 
-    if (in.hovered) {
-        if (std::fabs(in.x - _last_mouse[0]) > 1.0f || std::fabs(in.y - _last_mouse[1]) > 1.0f) {
-            _last_mouse[0] = in.x;
-            _last_mouse[1] = in.y;
-            _hover_surface = hit_surface(doc, vp, in.x, in.y, to_saved, _hover_pos);
-        }
-    } else {
-        _hover_surface = false;
-    }
+    if (!in.hovered) _hover_surface = false;
+    else if ((_pick_stale && !moved) || in.clicked) pick_here();
 
     if (in.clicked && in.hovered && _hover_surface) {
         if (!_has_a) {
@@ -355,10 +366,11 @@ void DistanceScaleTool::draw_viewport_toolbar(const ViewportOverlay& v,
         ImGui::SetNextItemWidth(px(84.0f));
         const bool enter = ui::InputFloatRaw("##set_dist", &_target_distance, 0.0f, 0.0f,
                                              "%.4f", ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::IsItemEdited()) _preview = true;
         ImGui::SameLine();
         ui::TextDisabledRaw("m");
 
-        const bool can_scale = _has_a && _has_b && measured_distance() > 1e-6 && _target_distance > 0.0f;
+        const bool can_scale = _has_a && _has_b && measured_distance() > 1e-6 && std::isfinite(_target_distance) && _target_distance > 0.0f;
         ImGui::SameLine();
         ImGui::BeginDisabled(!can_scale);
         if (ui::Button(xmsg::btn_apply_scale) || (enter && can_scale)) {
@@ -371,10 +383,6 @@ void DistanceScaleTool::draw_viewport_toolbar(const ViewportOverlay& v,
             reset();
         }
 
-        ImGui::SameLine();
-        if (ui::ButtonRaw("✕##closedist")) {
-            _active = false;
-        }
     }
     ImGui::End();
     ImGui::PopStyleColor();
@@ -402,10 +410,11 @@ void DistanceScaleTool::draw_panel_ui(spirula::Sim3& out_step, bool& should_scal
     ImGui::SetNextItemWidth(std::max(full * 0.5f, px(80.0f)));
     const bool enter = ui::InputFloatRaw("##panel_set_dist", &_target_distance, 0.0f, 0.0f,
                                          "%.4f", ImGuiInputTextFlags_EnterReturnsTrue);
+    if (ImGui::IsItemEdited()) _preview = true;
     ImGui::SameLine();
     ui::TextDisabledRaw("m");
 
-    const bool can_scale = _has_a && _has_b && measured_distance() > 1e-6 && _target_distance > 0.0f;
+    const bool can_scale = _has_a && _has_b && measured_distance() > 1e-6 && std::isfinite(_target_distance) && _target_distance > 0.0f;
     ImGui::BeginDisabled(!can_scale);
     if (ui::Button(xmsg::btn_apply_scale, ImVec2(half, 0)) || (enter && can_scale)) {
         trigger_scale(out_step, should_scale);

@@ -32,8 +32,6 @@ public:
                 const spirula::Sim3& saved_to_shared,
                 spirula::Sim3& out_step, bool& should_scale);
 
-    void apply_transform(const spirula::Sim3& step);
-
     void draw_overlay(ImDrawList* dl, const ViewportOverlay& v,
                       const ViewProjection& vp,
                       const spirula::Sim3& saved_to_shared) const;
@@ -44,6 +42,7 @@ public:
 
     void draw_panel_ui(spirula::Sim3& out_step, bool& should_scale);
 
+    spirula::Sim3 preview_step() const;
     int hint_state() const;
 
 private:
@@ -52,6 +51,7 @@ private:
                      double out_saved[3]) const;
     void trigger_scale(spirula::Sim3& out_step, bool& should_scale);
 
+    bool _preview = false;
     bool _active = false;
     bool _has_a = false;
     bool _has_b = false;
@@ -64,6 +64,7 @@ private:
     bool _hover_surface = false;
     double _hover_pos[3] = {0, 0, 0};
     float _last_mouse[2] = {-1.0f, -1.0f};
+    bool _pick_stale = true;
 };
 
 }  // namespace gui
