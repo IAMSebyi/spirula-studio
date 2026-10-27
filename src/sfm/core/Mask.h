@@ -171,13 +171,16 @@ inline std::string stripMaskTag(const std::string& s) {
     return s;
 }
 
+// RealityScan appends an index to the image's FILE name ("00002.jpg_00096");
+// "img_0012" keeps its digits, or every frame of a clip would claim "img".
 inline std::string stripIndexSuffix(const std::string& s) {
     size_t underscore = s.rfind('_');
     if (underscore == std::string::npos || underscore + 1 >= s.size()) return s;
     for (size_t i = underscore + 1; i < s.size(); ++i) {
         if (!std::isdigit((unsigned char)s[i])) return s;
     }
-    return s.substr(0, underscore);
+    const std::string base = s.substr(0, underscore);
+    return stripExt(base) != base ? base : s;
 }
 
 inline std::string baseName(const std::string& s) {

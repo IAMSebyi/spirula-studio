@@ -160,24 +160,26 @@ int main() {
         }
     }
 
-    // RealityScan mask filename conventions
+    // RealityScan's three mask exports, and an image name that is a prefix of another's.
     {
-        const fs::path rroot = base / "realityscan_masks";
-        fs::create_directories(rroot / "masks");
-        touch(rroot / "masks" / "00000.jpg.mask.png");
-        touch(rroot / "masks" / "00001.mask.png");
-        touch(rroot / "masks" / "00002.jpg_00096.mask.png");
-        touch(rroot / "masks" / "00003_00096.mask.png");
-
-        const std::string m0 = dsparse::find_aux_file((rroot / "masks").string(), "00000.jpg", "mask");
-        const std::string m1 = dsparse::find_aux_file((rroot / "masks").string(), "00001.jpg", "mask");
-        const std::string m2 = dsparse::find_aux_file((rroot / "masks").string(), "00002.jpg", "mask");
-        const std::string m3 = dsparse::find_aux_file((rroot / "masks").string(), "00003.jpg", "mask");
-
-        check(fs::path(m0) == rroot / "masks" / "00000.jpg.mask.png", "RealityScan mask option 1: 00000.jpg.mask.png");
-        check(fs::path(m1) == rroot / "masks" / "00001.mask.png", "RealityScan mask option 2: 00001.mask.png");
-        check(fs::path(m2) == rroot / "masks" / "00002.jpg_00096.mask.png", "RealityScan mask option 3: 00002.jpg_00096.mask.png");
-        check(fs::path(m3) == rroot / "masks" / "00003_00096.mask.png", "RealityScan mask indexed: 00003_00096.mask.png");
+        const fs::path md = base / "realityscan_masks" / "masks";
+        fs::create_directories(md / "cam0");
+        touch(md / "00000.jpg.mask.png");
+        touch(md / "00001.mask.png");
+        touch(md / "00002.jpg_00096.mask.png");
+        touch(md / "cam0" / "00004.jpg_00097.mask.png");
+        touch(md / "IMG_7_2_mask.png");
+        auto find = [&](const char* rel) {
+            return fs::path(dsparse::find_aux_file(md.string(), rel, "mask"));
+        };
+        check(find("00000.jpg") == md / "00000.jpg.mask.png", "RealityScan <image>.mask.png");
+        check(find("00001.jpg") == md / "00001.mask.png", "RealityScan <stem>.mask.png");
+        check(find("00002.jpg") == md / "00002.jpg_00096.mask.png",
+              "RealityScan <image>_<index>.mask.png");
+        check(find("cam0/00004.jpg") == md / "cam0" / "00004.jpg_00097.mask.png",
+              "RealityScan indexed mask in a sub-folder");
+        check(find("00003.jpg").empty(), "an image without a mask finds none");
+        check(find("IMG_7.jpg").empty(), "IMG_7.jpg does not take IMG_7_2's mask");
     }
 
     fs::remove_all(base, ec);

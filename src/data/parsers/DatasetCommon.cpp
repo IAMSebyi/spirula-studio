@@ -9,11 +9,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -261,6 +266,29 @@ void assign_val_split(ParsedDataset& ds, float validation_fraction) {
 // ---------------------------------------------------------------------------
 // Auxiliary buffer discovery
 // ---------------------------------------------------------------------------
+namespace {
+// Read once per folder, not once per image without a direct match, which made
+// discovery quadratic in the image count. A changed folder changes its mtime.
+std::shared_ptr<const std::vector<std::string>> listed_files(const fs::path& dir) {
+    static std::mutex mu;
+    static std::map<std::string, std::pair<fs::file_time_type,
+                                           std::shared_ptr<const std::vector<std::string>>>> cache;
+    std::error_code ec;
+    const fs::file_time_type stamp = fs::last_write_time(dir, ec);
+    if (ec) return std::make_shared<const std::vector<std::string>>();
+    std::lock_guard<std::mutex> lk(mu);
+    if (const auto it = cache.find(dir.string()); it != cache.end() && it->second.first == stamp)
+        return it->second.second;
+    auto names = std::make_shared<std::vector<std::string>>();
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec))
+        if (it->is_regular_file(ec)) names->push_back(it->path().filename().string());
+    if (cache.size() >= 16) cache.clear();
+    cache[dir.string()] = {stamp, names};
+    return names;
+}
+}  // namespace
+
 std::string find_aux_file(const std::string& aux_dir_s, const std::string& rel_name,
                           const char* suffix_tag) {
     fs::path aux_dir(aux_dir_s);
@@ -308,41 +336,26 @@ std::string find_aux_file(const std::string& aux_dir_s, const std::string& rel_n
         if (fs::exists(p, ec)) return p.string();
     }
     if (suffix_tag && *suffix_tag) {
-        const fs::path search_dirs[] = {aux_dir / rel.parent_path(), aux_dir};
         const std::string fname = rel.filename().string();
-        const std::string fstem = rel.stem().string();
-        const std::string prefix_full = fname + "_";
-        const std::string prefix_stem = fstem + "_";
         const std::string tag = suffix_tag;
-        for (const auto& sdir : search_dirs) {
-            if (!fs::is_directory(sdir, ec)) continue;
-            for (auto it = fs::directory_iterator(sdir, ec);
-                 !ec && it != fs::directory_iterator(); it.increment(ec)) {
-                if (!it->is_regular_file(ec)) continue;
-                const std::string name = it->path().filename().string();
-                if (name.rfind(prefix_full, 0) == 0 && name.find(tag) != std::string::npos) {
-                    for (const auto& e : exts) {
-                        if (name.size() >= e.size() &&
-                            name.compare(name.size() - e.size(), e.size(), e) == 0)
-                            return it->path().string();
-                    }
-                }
-            }
-            for (auto it = fs::directory_iterator(sdir, ec);
-                 !ec && it != fs::directory_iterator(); it.increment(ec)) {
-                if (!it->is_regular_file(ec)) continue;
-                const std::string name = it->path().filename().string();
-                if (name.rfind(prefix_stem, 0) == 0) {
-                    size_t tag_pos = name.find(tag, prefix_stem.size());
-                    if (tag_pos != std::string::npos) {
-                        for (const auto& e : exts) {
-                            if (name.size() >= e.size() &&
-                                name.compare(name.size() - e.size(), e.size(), e) == 0)
-                                return it->path().string();
-                        }
-                    }
-                }
-            }
+        // RealityScan's indexed export: "<image file>_<digits>.<tag>.png".
+        auto indexed = [&](const std::string& name) {
+            if (name.size() <= fname.size() + 1 || name.compare(0, fname.size(), fname) != 0 ||
+                name[fname.size()] != '_')
+                return false;
+            size_t d = fname.size() + 1;
+            const size_t digits = d;
+            while (d < name.size() && std::isdigit((unsigned char)name[d])) d++;
+            if (d == digits || d == name.size() || std::strchr("._-", name[d]) == nullptr)
+                return false;
+            for (const auto& e : exts)
+                if (name.compare(d + 1, std::string::npos, tag + e) == 0) return true;
+            return false;
+        };
+        for (const fs::path& sdir : {aux_dir / rel.parent_path(), aux_dir}) {
+            for (const std::string& name : *listed_files(sdir))
+                if (indexed(name)) return (sdir / name).string();
+            if (!rel.has_parent_path()) break;
         }
     }
     return "";
