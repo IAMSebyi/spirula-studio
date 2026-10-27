@@ -9,10 +9,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -260,23 +266,97 @@ void assign_val_split(ParsedDataset& ds, float validation_fraction) {
 // ---------------------------------------------------------------------------
 // Auxiliary buffer discovery
 // ---------------------------------------------------------------------------
+namespace {
+// Read once per folder, not once per image without a direct match, which made
+// discovery quadratic in the image count. A changed folder changes its mtime.
+std::shared_ptr<const std::vector<std::string>> listed_files(const fs::path& dir) {
+    static std::mutex mu;
+    static std::map<std::string, std::pair<fs::file_time_type,
+                                           std::shared_ptr<const std::vector<std::string>>>> cache;
+    std::error_code ec;
+    const fs::file_time_type stamp = fs::last_write_time(dir, ec);
+    if (ec) return std::make_shared<const std::vector<std::string>>();
+    std::lock_guard<std::mutex> lk(mu);
+    if (const auto it = cache.find(dir.string()); it != cache.end() && it->second.first == stamp)
+        return it->second.second;
+    auto names = std::make_shared<std::vector<std::string>>();
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec))
+        if (it->is_regular_file(ec)) names->push_back(it->path().filename().string());
+    if (cache.size() >= 16) cache.clear();
+    cache[dir.string()] = {stamp, names};
+    return names;
+}
+}  // namespace
+
 std::string find_aux_file(const std::string& aux_dir_s, const std::string& rel_name,
                           const char* suffix_tag) {
     fs::path aux_dir(aux_dir_s);
     const fs::path rel = fs::path(rel_name).lexically_normal();
     if (rel.empty() || rel.is_absolute() || *rel.begin() == "..") return "";
-    if (!fs::is_directory(aux_dir)) return "";
-    std::string stem_rel = (rel.parent_path() / rel.stem()).string();
+    std::error_code ec;
+    if (!fs::is_directory(aux_dir, ec)) return "";
+    const std::string stem_rel = (rel.parent_path() / rel.stem()).string();
     const std::string exts[] = {".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG"};
     std::vector<std::string> candidates;
     for (const auto& e : exts) {
         candidates.push_back(rel.string() + e);   // image.jpg.png
-        candidates.push_back(stem_rel + e);   // image.png
+        candidates.push_back(stem_rel + e);       // image.png
     }
-    candidates.push_back(stem_rel + "_" + suffix_tag + ".png");   // image_mask.png
+    if (suffix_tag && *suffix_tag) {
+        const std::string tag = suffix_tag;
+        for (const auto& e : exts) {
+            candidates.push_back(rel.string() + "." + tag + e);     // image.jpg.mask.png
+            candidates.push_back(stem_rel + "." + tag + e);         // image.mask.png
+            candidates.push_back(rel.string() + "_" + tag + e);     // image.jpg_mask.png
+            candidates.push_back(stem_rel + "_" + tag + e);         // image_mask.png
+            candidates.push_back(rel.string() + "-" + tag + e);     // image.jpg-mask.png
+            candidates.push_back(stem_rel + "-" + tag + e);         // image-mask.png
+        }
+    }
+    if (rel.has_parent_path()) {
+        const std::string fname = rel.filename().string();
+        const std::string fstem = rel.stem().string();
+        for (const auto& e : exts) {
+            candidates.push_back(fname + e);
+            candidates.push_back(fstem + e);
+        }
+        if (suffix_tag && *suffix_tag) {
+            const std::string tag = suffix_tag;
+            for (const auto& e : exts) {
+                candidates.push_back(fname + "." + tag + e);
+                candidates.push_back(fstem + "." + tag + e);
+                candidates.push_back(fname + "_" + tag + e);
+                candidates.push_back(fstem + "_" + tag + e);
+            }
+        }
+    }
     for (const auto& cand : candidates) {
         fs::path p = aux_dir / cand;
-        if (fs::exists(p)) return p.string();
+        if (fs::exists(p, ec)) return p.string();
+    }
+    if (suffix_tag && *suffix_tag) {
+        const std::string fname = rel.filename().string();
+        const std::string tag = suffix_tag;
+        // RealityScan's indexed export: "<image file>_<digits>.<tag>.png".
+        auto indexed = [&](const std::string& name) {
+            if (name.size() <= fname.size() + 1 || name.compare(0, fname.size(), fname) != 0 ||
+                name[fname.size()] != '_')
+                return false;
+            size_t d = fname.size() + 1;
+            const size_t digits = d;
+            while (d < name.size() && std::isdigit((unsigned char)name[d])) d++;
+            if (d == digits || d == name.size() || std::strchr("._-", name[d]) == nullptr)
+                return false;
+            for (const auto& e : exts)
+                if (name.compare(d + 1, std::string::npos, tag + e) == 0) return true;
+            return false;
+        };
+        for (const fs::path& sdir : {aux_dir / rel.parent_path(), aux_dir}) {
+            for (const std::string& name : *listed_files(sdir))
+                if (indexed(name)) return (sdir / name).string();
+            if (!rel.has_parent_path()) break;
+        }
     }
     return "";
 }
@@ -681,6 +761,13 @@ void fit_camera_resolution(const DatasetParserConfig& cfg,
 void read_gauge(const std::string& dir, ParsedDataset& ds) {
     std::ifstream f(dir + "/gauge.txt");
     if (!f) return;
+    auto number = [](const std::string& v, double& out) {
+        char* end = nullptr;
+        out = std::strtod(v.c_str(), &end);
+        return end != v.c_str() && !*end;
+    };
+    spirula::GeoReference& geo = ds.gauge_geo;
+    bool lat = false, lon = false, alt = false;
     // Line at a time, so a comment with an odd number of words cannot shift
     // every key onto the wrong value.
     std::string line;
@@ -690,7 +777,13 @@ void read_gauge(const std::string& dir, ParsedDataset& ds) {
         if (!(in >> key >> value) || key[0] == '#') continue;
         if (key == "oriented") ds.gauge_oriented = value == "1";
         else if (key == "metric") ds.gauge_metric = value == "1";
+        else if (key == "origin_lat") lat = number(value, geo.lat_deg);
+        else if (key == "origin_lon") lon = number(value, geo.lon_deg);
+        else if (key == "origin_alt") alt = number(value, geo.alt_m);
+        else if (key == "alt_source") geo.alt_source = value;
     }
+    geo.ok = lat && lon;
+    if (!alt) geo.alt_source.clear();
 }
 
 }  // namespace dsparse

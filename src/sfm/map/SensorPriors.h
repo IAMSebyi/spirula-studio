@@ -168,9 +168,12 @@ inline MetricFit gpsCentreFactors(MetricRef ref, const Vec3* up_w, double max_er
             fitted.centres.push_back(ref.centres[i]);
             fitted.targets.push_back(ref.targets[i]);
             fitted.image_ids.push_back(ref.image_ids[i]);
+            if (i < ref.tracks.size()) fitted.tracks.push_back(ref.tracks[i]);
         }
     fit = fitMetricGauge(fitted, max_error, up_w ? MetricAxes::Horizontal : MetricAxes::Full,
-                         max_error_frac);
+                         max_error_frac,
+                         up_w && trusted ? MetricTrackOffsets::Vertical
+                                         : MetricTrackOffsets::None);
     if (!fit.ok) return fit;
     // 1e-6 of the spread keeps exact (synthetic) positions' factors finite.
     const double least = 1e-6 * fit.spread;
@@ -188,6 +191,7 @@ inline MetricFit gpsCentreFactors(MetricRef ref, const Vec3* up_w, double max_er
         f.img[0] = ref.image_ids[i];
         f.A[0] = A;
         f.b = ref.targets[i] - fit.T.t;
+        if (i < ref.tracks.size()) f.b.z -= fit.trackVerticalOffset(ref.tracks[i]);
         f.sigma = {sh, sh, levelOnly(i) ? 0.0 : sv};
         f.cauchy = trusted ? kTrustedGpsCauchy : 0.0;
         out.centres.push_back(f);
@@ -200,6 +204,8 @@ inline MetricFit gpsCentreFactors(MetricRef ref, const Vec3* up_w, double max_er
     out.gps.gate = fit.max_error;
     out.gps.centroid = fit.centroid;
     out.gps.spread = fit.spread;
+    out.gps.track_ids = fit.track_ids;
+    out.gps.track_vertical_offsets = fit.track_vertical_offsets;
     return fit;
 }
 
@@ -436,6 +442,24 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return positionLocked(img, p);
     }
+    GeoOrigin origin() const override {
+        std::lock_guard<std::mutex> lk(mu_);
+        ensureEnuOrigin();
+        return enu_origin_;
+    }
+
+    bool positionError(uint32_t img, const Pose& pose, const GpsFrame& f,
+                       double& metres) const override {
+        if (!f.ok || !opt_.gps || !has(img)) return false;
+        std::lock_guard<std::mutex> lk(mu_);
+        Vec3 p;
+        if (!positionLocked(img, p)) return false;
+        p.z -= f.trackVerticalOffset(cap_[img]);
+        Vec3 r = mul(f.A, cameraCenter(pose)) + f.t - p;
+        if (f.flat) r.z = 0;
+        metres = r.norm();
+        return true;
+    }
 
     PosePriors factors(const std::vector<PosedImage>& imgs) override {
         // Atom mappers on several threads share one source (map/Atoms.h).
@@ -450,7 +474,7 @@ private:
         TelemetryGps g;
         if (!tl.gpsAt(time(img), g)) return false;
         ensureEnuOrigin();
-        p = enuFromGeodetic({{g.lat, g.lon, g.has_alt ? g.alt : 0.0}}, enu_origin_)[0];
+        p = enuFromGeodetic({{g.lat, g.lon, g.has_alt ? g.alt : 0.0}}, enu_origin_.at)[0];
         return true;
     }
 
@@ -713,17 +737,7 @@ private:
 
     void ensureEnuOrigin() const {
         if (enu_origin_ok_) return;
-        std::vector<Geodetic> all;
-        for (const SensorCapture& c : caps_)
-            if (c.timeline && c.timeline->hasGps())
-                for (const TelemetryGps& g : c.timeline->gpsFixes())
-                    all.push_back({g.lat, g.lon, g.has_alt ? g.alt : 0.0});
-        enu_origin_ = Geodetic{};
-        for (const Geodetic& g : all) {
-            enu_origin_.lat_deg += g.lat_deg / (double)all.size();
-            enu_origin_.lon_deg += g.lon_deg / (double)all.size();
-            enu_origin_.alt_m += g.alt_m / (double)all.size();
-        }
+        enu_origin_ = telemetryGeoOrigin(caps_);
         enu_origin_ok_ = true;
     }
 
@@ -735,6 +749,7 @@ private:
             ref.centres.push_back(f.c);
             ref.targets.push_back(p);
             ref.image_ids.push_back(f.image_id);
+            ref.tracks.push_back(f.capture);
         }
         const int posed = (int)ref.centres.size();
         const size_t before = out.centres.size();
@@ -764,7 +779,7 @@ private:
     std::vector<SensorGroupState> groups_;
     std::unordered_map<uint64_t, Preintegration> preint_;
     SensorFactorStats stats_;
-    mutable Geodetic enu_origin_;
+    mutable GeoOrigin enu_origin_;
     mutable bool enu_origin_ok_ = false;
     mutable std::mutex mu_;
 };
@@ -779,9 +794,14 @@ public:
                   std::vector<char> level = {}, std::vector<char> no_alt = {})
         : opt_(opt), level_(std::move(level)), no_alt_(std::move(no_alt)) {
         std::vector<Geodetic> g;
-        for (const std::optional<Geodetic>& f : fixes)
-            if (f) g.push_back(*f);
-        const std::vector<Vec3> enu = enuFromGeodetic(g);
+        bool every_alt = true;
+        for (size_t i = 0; i < fixes.size(); i++) {
+            if (!fixes[i]) continue;
+            g.push_back(*fixes[i]);
+            every_alt = every_alt && !noAlt((uint32_t)i);
+        }
+        if (!g.empty()) origin_ = {true, meanGeodetic(g), every_alt ? "exif" : ""};
+        const std::vector<Vec3> enu = enuFromGeodetic(g, origin_.at);
         pos_.resize(fixes.size());
         for (size_t i = 0, k = 0; i < fixes.size(); i++)
             if (fixes[i]) pos_[i] = enu[k++];
@@ -806,6 +826,7 @@ public:
         p = *pos_[img];
         return true;
     }
+    GeoOrigin origin() const override { return origin_; }
     bool declaredUp(uint32_t img, Vec3& u) const override {
         if (level_off_ || img >= level_.size() || !level_[img]) return false;
         u = kLevelErpUp;
@@ -883,6 +904,7 @@ private:
     std::vector<char> no_alt_;
     std::atomic<bool> level_off_{false};
     std::vector<std::optional<Vec3>> pos_;
+    GeoOrigin origin_;
     SensorFactorStats stats_;
     mutable std::mutex mu_;
 };

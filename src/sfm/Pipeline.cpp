@@ -264,7 +264,7 @@ SensorCaptures loadSensorCaptures(const SfmConfig& cfg, bool verbose) {
         lc->cap.time_offset = in.time_offset;
         lc->cap.readout = t.frame_readout;
         lc->cap.timeline = &lc->timeline;
-        lc->carrier = t.carrier;
+        lc->cap.carrier = t.carrier;
         L::out(Tag::Orient, M::sensor_file,
                {in.path, t.camera.empty() ? "?" : t.camera, L::num(c.gyro.rate_hz, 0),
                 L::num(c.accel.rate_hz, 0), L::num(c.orientation.rate_hz, 0),
@@ -370,6 +370,12 @@ void reportSensorGauge(size_t i, const SensorGaugeResult& r,
         else
             L::err(Tag::Orient, M::sensor_scale_gps_failed, {model, metricReason(r.gps)});
     }
+    for (size_t k = 0; k < r.gps.track_ids.size() && k < r.gps.track_vertical_offsets.size(); k++) {
+        const int track = r.gps.track_ids[k];
+        if (track < 0 || (size_t)track >= caps.size()) continue;
+        L::out(Tag::Orient, M::sensor_gps_track_altitude,
+               {caps[(size_t)track]->cap.path, L::num(r.gps.track_vertical_offsets[k], 3)});
+    }
     if (r.disagree)
         L::warn(Tag::Orient, M::sensor_disagree, {model, L::num(r.scale_imu, 6), L::num(r.scale_gps, 6)});
     if (!r.applied) return;
@@ -452,7 +458,7 @@ MetricGpsEvidence metricGpsEvidence(const SfmConfig& cfg, const SensorCaptures& 
     for (const auto& lc : sensors.loaded) {
         if (!lc->timeline.hasGps()) continue;
         e.telemetry_gps++;
-        e.telemetry_dji += lc->carrier == TelemetryCarrier::DjiDvtm;
+        e.telemetry_dji += lc->cap.carrier == TelemetryCarrier::DjiDvtm;
     }
     if (imagedir.empty() || e.positions_file || e.telemetry_gps) return e;
     std::error_code walk, ec;
@@ -686,6 +692,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
                                  : r.scale_from_imu                   ? "imu"
                                                                      : "gps";
                 gauge[i].scale_sigma = r.scale_sigma;
+                if (r.place_from_gps) gauge[i].origin = r.origin;
             }
         }
     }
@@ -749,6 +756,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
         applySim3(models[i], Sim3{s, mat3Scale(f.A, 1.0 / s), f.t});
         gauge[i].metric = true;
         gauge[i].scale = "gps";
+        gauge[i].origin = mapped->origin();
         gauge[i].oriented = !guessed;
         gauge[i].up = f.up == GpsUp::Imu        ? "sensors"
                       : f.up == GpsUp::Declared ? "level"
@@ -794,6 +802,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
         gauge[i].metric = true;
         gauge[i].scale = file ? "positions" : "gps";
         gauge[i].scale_sigma = fit.scale_unc;
+        gauge[i].origin = ref.origin;
         // Horizontal fits scale, heading and place only, so which way is up is
         // still whatever `pre` left it as: the sensors, or the cameras.
         if (!flat) {
@@ -868,6 +877,7 @@ bool fixGauge(std::vector<Reconstruction>& models, const SfmConfig& cfg,
             const GroundFit g = groundTransform(models[i], false);
             if (!g.found) continue;
             applySim3(models[i], g.T);
+            gauge[i].origin.at.alt_m -= g.T.t.z;   // z = 0 is the ground now
             L::out(Tag::Orient, M::orient_ground_height,
                    {(long long)i, (long long)std::lround(g.share * 100.0)});
         }
@@ -992,9 +1002,9 @@ void splitCamerasBySize(std::vector<Reconstruction>& models,
     }
 }
 
-// gauge.txt beside the model: whether +Z is up and whether a unit is a metre.
-// Plain text and not hidden, because it is as much for the user reading the
-// folder as for the viewer that stops guessing an up axis when it is there.
+// gauge.txt beside the model: whether +Z is up, whether a unit is a metre, and
+// where on Earth (0,0,0) is. Plain text and not hidden, because it is as much
+// for the user reading the folder as for the viewer that stops guessing an up axis.
 void writeGauge(const fs::path& dir, const ModelGauge& g) {
     std::ofstream f(dir / "gauge.txt", std::ios::trunc);
     if (!f) return;
@@ -1004,6 +1014,15 @@ void writeGauge(const fs::path& dir, const ModelGauge& g) {
     f << "up " << g.up << "\n";
     f << "scale " << g.scale << "\n";
     if (g.scale_sigma > 0) f << "scale_sigma " << g.scale_sigma << "\n";
+    if (!g.origin.ok) return;
+    // 1e-9 degrees is 0.1 mm.
+    char buf[128];
+    std::snprintf(buf, sizeof buf, "origin_lat %.9f\norigin_lon %.9f\n", g.origin.at.lat_deg,
+                  g.origin.at.lon_deg);
+    f << "# x east, y north of this WGS-84 point, in metres\n" << buf;
+    if (g.origin.alt.empty()) return;
+    std::snprintf(buf, sizeof buf, "origin_alt %.3f\n", g.origin.at.alt_m);
+    f << buf << "alt_source " << g.origin.alt << "\n";
 }
 
 // rigs.txt beside a model that used one: each member's cam_from_rig as the
@@ -2069,8 +2088,31 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
         createFeatureMatcher(cfg.matcher, opt, cfg.lightglue, cfg.loma_match);
     if (verbose && cfg.matcher != "bruteforce")
         L::err(Tag::Match, M::match_matcher_name, {matcher->name()});
+    // Pairs the focal search already matched, by pairKey: with a camera per
+    // image its sample is every pair, which matching them again would double.
+    std::unordered_map<uint64_t, std::vector<FeatureMatch>> premat;
     auto matchFn = [&](size_t b, size_t e, std::vector<std::vector<FeatureMatch>>& mout) {
-        matcher->matchBatch(feats, todo, b, e, mout);
+        if (premat.empty()) {
+            matcher->matchBatch(feats, todo, b, e, mout);
+            return;
+        }
+        mout.assign(e - b, {});
+        std::vector<std::pair<uint32_t, uint32_t>> rest;
+        std::vector<size_t> rest_at;
+        for (size_t k = b; k < e; k++) {
+            const auto it = premat.find(resume::pairKey(todo[k].first, todo[k].second));
+            if (it == premat.end()) {
+                rest.push_back(todo[k]);
+                rest_at.push_back(k - b);
+                continue;
+            }
+            mout[k - b] = std::move(it->second);
+            premat.erase(it);
+        }
+        if (rest.empty()) return;
+        std::vector<std::vector<FeatureMatch>> got;
+        matcher->matchBatch(feats, rest, 0, rest.size(), got);
+        for (size_t k = 0; k < rest.size(); k++) mout[rest_at[k]] = std::move(got[k]);
     };
     // Rate-limiting the printed line lives in the CLI's event sink, which is
     // the only thing that prints it; verifyPairs emits the fraction either way.
@@ -2106,12 +2148,17 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                 size_t stride = std::max<size_t>(1, pairs.size() / std::max<size_t>(1, want));
                 for (size_t p = 0; p < pairs.size() && sample.size() < want; p += stride)
                     sample.push_back(pairs[p]);
+                // With a camera per image the sample is every pair, which with a
+                // learned matcher is as long as matching itself.
                 std::vector<std::vector<FeatureMatch>> chunk;
+                events::stage_begin(Stage::Focal, (int64_t)sample.size());
                 for (size_t b = 0; b < sample.size(); b += 16) {
                     size_t e = std::min(b + 16, sample.size());
                     matcher->matchBatch(feats, sample, b, e, chunk);
                     for (size_t k = b; k < e; k++) sm.push_back(std::move(chunk[k - b]));
+                    events::progress(Stage::Focal, (int64_t)e, (int64_t)sample.size());
                 }
+                events::stage_end(Stage::Focal);
             }
             if (want_rect) {
                 double t_f = now();
@@ -2151,6 +2198,9 @@ int matchFeatureDir(const std::string& featdir, const SfmConfig& cfg, PairMode m
                             L::num(bc.bytes() / 1048576.0, 0), focals});
                 }
             }
+            for (size_t k = 0; k < sample.size() && k < sm.size(); k++)
+                premat.emplace(resume::pairKey(sample[k].first, sample[k].second),
+                               std::move(sm[k]));
         }
         // The gyro's word on every pair it covers: calibrated on a sample of
         // time-adjacent pairs first, since the rotation prior needs the

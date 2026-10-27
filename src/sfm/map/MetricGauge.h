@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "sfm/core/Exif.h"
+#include "sfm/core/Geodetic.h"
 #include "sfm/core/Model.h"
 #include "sfm/core/Pose.h"
 #include "sfm/map/Orient.h"
@@ -41,6 +43,10 @@ struct MetricRef {
     std::vector<Vec3> centres;
     std::vector<Vec3> targets;
     std::vector<uint32_t> image_ids;
+    GeoOrigin origin;   // where `targets` are centred, when they are GPS
+    // A telemetry capture for every pair, or -1 where no identity exists.
+    // A full GPS fit may remove one barometric altitude constant per capture.
+    std::vector<int> tracks;
 };
 
 enum class MetricFail { None, Pairs, Distinct, Spread, Inliers, Collinear, Tilted };
@@ -49,6 +55,8 @@ enum class MetricFail { None, Pairs, Distinct, Spread, Inliers, Collinear, Tilte
 // level pair and takes the tilt from the caller's own up axis: a GPS altitude
 // biased by metres tips a full fit by degrees over a 100 m capture (D75).
 enum class MetricAxes { Full, Horizontal };
+
+enum class MetricTrackOffsets { None, Vertical };
 
 struct MetricFit {
     bool ok = false;
@@ -73,6 +81,16 @@ struct MetricFit {
     double scale_3d = 0;
     double vertical_sigma = 0;
     std::vector<char> inlier_mask;
+    // The amount subtracted from a track's stated ENU altitude before the
+    // fit. The weighted mean is zero; the global Z translation owns the datum.
+    std::vector<int> track_ids;
+    std::vector<double> track_vertical_offsets;
+
+    double trackVerticalOffset(int track) const {
+        for (size_t i = 0; i < track_ids.size() && i < track_vertical_offsets.size(); i++)
+            if (track_ids[i] == track) return track_vertical_offsets[i];
+        return 0.0;
+    }
 };
 
 // Orientation error grows as 1/perp_frac against scale error, so 0.05 refuses
@@ -189,9 +207,9 @@ inline bool estimateSim3Yaw(const std::vector<Vec3>& src, const std::vector<Vec3
 // The similarity taking `ref.centres` onto `ref.targets`, refused with a named reason when
 // the data cannot support one. `max_error` > 0 fixes the inlier radius (or `max_error_frac`
 // of the spread, if larger); 0 takes it from the references' own scatter about the fit.
-inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
-                                MetricAxes axes = MetricAxes::Full,
-                                double max_error_frac = 0.0) {
+inline MetricFit fitMetricGaugeRaw(const MetricRef& ref, double max_error,
+                                   MetricAxes axes = MetricAxes::Full,
+                                   double max_error_frac = 0.0) {
     MetricFit out;
     out.max_error = max_error;
     const bool flat = axes == MetricAxes::Horizontal;
@@ -385,6 +403,57 @@ inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
     return out;
 }
 
+// A new recording can start a new barometric datum. With the centres levelled by a
+// measured up, a level seed reads each track's step (a median, so fixes stated at sea
+// level do not move it); the requested fit then runs on the corrected targets.
+inline MetricFit fitMetricGauge(const MetricRef& ref, double max_error,
+                                MetricAxes axes = MetricAxes::Full,
+                                double max_error_frac = 0.0,
+                                MetricTrackOffsets offsets = MetricTrackOffsets::None) {
+    if (offsets != MetricTrackOffsets::Vertical || ref.tracks.size() != ref.centres.size())
+        return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+
+    std::map<int, int> offered;
+    for (int track : ref.tracks)
+        if (track >= 0) offered[track]++;
+    if (std::count_if(offered.begin(), offered.end(), [](const auto& kv) { return kv.second >= 3; }) < 2)
+        return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+
+    // A full seed would trade a track's barometric step for a tilt.
+    const MetricFit seed = fitMetricGaugeRaw(ref, max_error, MetricAxes::Horizontal, max_error_frac);
+    if (!seed.ok) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    std::map<int, std::vector<double>> residuals;
+    for (size_t i = 0; i < ref.centres.size(); i++)
+        if (ref.tracks[i] >= 0 && seed.inlier_mask[i])
+            residuals[ref.tracks[i]].push_back(ref.targets[i].z -
+                                               transformPoint(seed.T, ref.centres[i]).z);
+    std::vector<int> tracks;
+    std::vector<double> dz;
+    double datum = 0.0;
+    int n = 0;
+    for (auto& kv : residuals) {
+        const int count = (int)kv.second.size();
+        if (count < 3) continue;
+        tracks.push_back(kv.first);
+        dz.push_back(detail::medianOf(std::move(kv.second)));
+        datum += dz.back() * count;
+        n += count;
+    }
+    if (tracks.size() < 2) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    // Zero mean over the frames: the fit's translation owns the datum.
+    for (double& z : dz) z -= datum / n;
+
+    MetricRef corrected = ref;
+    for (size_t i = 0; i < corrected.targets.size(); i++)
+        for (size_t k = 0; k < tracks.size(); k++)
+            if (corrected.tracks[i] == tracks[k]) corrected.targets[i].z -= dz[k];
+    MetricFit fit = fitMetricGaugeRaw(corrected, max_error, axes, max_error_frac);
+    if (!fit.ok) return fitMetricGaugeRaw(ref, max_error, axes, max_error_frac);
+    fit.track_ids = std::move(tracks);
+    fit.track_vertical_offsets = std::move(dz);
+    return fit;
+}
+
 // What pairing found, so a run can say why it has fewer cameras than either
 // side offered.
 struct MetricPairCounts {
@@ -461,59 +530,6 @@ inline MetricPairCounts pairMetricRef(const Reconstruction& rec,
 }
 
 
-struct Geodetic {
-    double lat_deg = 0, lon_deg = 0, alt_m = 0;
-};
-
-// WGS-84 geodetic to earth-centred earth-fixed, in double: ECEF magnitudes are
-// ~6.4e6 m, where a float's half-ulp is 0.25 m.
-inline Vec3 ecefFromGeodetic(double lat_deg, double lon_deg, double h) {
-    constexpr double a = 6378137.0, f = 1.0 / 298.257223563;
-    constexpr double e2 = f * (2.0 - f);
-    const double p = lat_deg * M_PI / 180.0, l = lon_deg * M_PI / 180.0;
-    const double sp = std::sin(p), cp = std::cos(p);
-    const double N = a / std::sqrt(1.0 - e2 * sp * sp);
-    return {(N + h) * cp * std::cos(l), (N + h) * cp * std::sin(l), (N * (1.0 - e2) + h) * sp};
-}
-
-// A local east-north-up metre frame about `origin`. Right-handed, north
-// positive. Not valid across the antimeridian or over ~100 km.
-inline std::vector<Vec3> enuFromGeodetic(const std::vector<Geodetic>& g,
-                                         const Geodetic& origin) {
-    std::vector<Vec3> out;
-    if (g.empty()) return out;
-    const double lat0 = origin.lat_deg, lon0 = origin.lon_deg, h0 = origin.alt_m;
-    const Vec3 o = ecefFromGeodetic(lat0, lon0, h0);
-    const double p = lat0 * M_PI / 180.0, l = lon0 * M_PI / 180.0;
-    const double sp = std::sin(p), cp = std::cos(p), sl = std::sin(l), cl = std::cos(l);
-    out.reserve(g.size());
-    for (const Geodetic& q : g) {
-        const Vec3 d = ecefFromGeodetic(q.lat_deg, q.lon_deg, q.alt_m) - o;
-        out.push_back({-sl * d.x + cl * d.y,
-                       -sp * cl * d.x - sp * sl * d.y + cp * d.z,
-                       cp * cl * d.x + cp * sl * d.y + sp * d.z});
-    }
-    return out;
-}
-
-// The same, about the mean of the fixes. The rotation depends on where the
-// origin is, so two origins do not differ by a translation alone.
-inline std::vector<Vec3> enuFromGeodetic(const std::vector<Geodetic>& g) {
-    if (g.empty()) return {};
-    Geodetic o;
-    for (const Geodetic& q : g) {
-        o.lat_deg += q.lat_deg;
-        o.lon_deg += q.lon_deg;
-        o.alt_m += q.alt_m;
-    }
-    const double inv = 1.0 / (double)g.size();
-    o.lat_deg *= inv;
-    o.lon_deg *= inv;
-    o.alt_m *= inv;
-    return enuFromGeodetic(g, o);
-}
-
-
 // What reading GPS off the images found.
 struct MetricGpsCounts {
     int matched = 0;
@@ -547,7 +563,9 @@ inline MetricGpsCounts metricRefFromGps(const Reconstruction& rec, const std::st
         ids.push_back(kv.first);
         c.matched++;
     }
-    std::vector<Vec3> enu = enuFromGeodetic(g);
+    if (g.empty()) return c;
+    ref.origin = {true, meanGeodetic(g), c.no_alt ? "" : "exif"};
+    std::vector<Vec3> enu = enuFromGeodetic(g, ref.origin.at);
     for (size_t i = 0; i < enu.size(); i++) {
         ref.centres.push_back(centres[i]);
         ref.targets.push_back(enu[i]);
