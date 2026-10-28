@@ -1,47 +1,35 @@
 #pragma once
 
-// Interactive match matrix viewer and pair editor.
-// Allows zooming, panning, selecting regions, inspecting pairs with feature/match
-// overlays, and adding or removing matches directly from matches.bin.
+// The match map at full size, for taking false pairs out of a finished run's
+// matches.bin by hand (a loop closure between two sides of a symmetric object).
 
 #include "app/gui/MatchMatrix.h"
 #include "app/gui/PairPreview.h"
 #include "app/gui/SfmProgress.h"
 
-#ifdef SS_TOOL_SFM
-#include "sfm/core/Matches.h"
-#endif
-
 #include "imgui.h"
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace gui {
 
+// Finer than the dataset screen's map, which keeps the live matrix's 512: one
+// image per cell to 2048 images, a 12 MB texture held only while open.
+inline constexpr uint32_t kEditorMatrixBins = 2048;
+
+// Rows [r0, r1) against columns [c0, c1), in cells. A pair is unordered, so it
+// is in the selection when either of its two orders is in the box.
 struct MatrixSelection {
     bool active = false;
-    uint32_t r0 = 0, r1 = 0;
-    uint32_t c0 = 0, c1 = 0;
-    bool symmetric = true;
-
+    uint32_t r0 = 0, r1 = 0, c0 = 0, c1 = 0;
     bool contains(uint32_t r, uint32_t c) const {
         if (!active) return false;
-        bool in = (r >= r0 && r < r1 && c >= c0 && c < c1);
-        if (symmetric) in = in || (c >= r0 && c < r1 && r >= c0 && r < c1);
-        return in;
+        return (r >= r0 && r < r1 && c >= c0 && c < c1) ||
+               (c >= r0 && c < r1 && r >= c0 && r < c1);
     }
-
-    bool is_single() const {
-        return active && (r1 == r0 + 1) && (c1 == c0 + 1);
-    }
-
-    void clear() {
-        active = false;
-        r0 = r1 = c0 = c1 = 0;
-    }
+    bool single() const { return active && r1 == r0 + 1 && c1 == c0 + 1; }
 };
 
 class MatchMatrixEditor {
@@ -49,62 +37,57 @@ public:
     MatchMatrixEditor();
     ~MatchMatrixEditor();
 
+    // The run's files. Another matches.bin forgets the undo history.
     void configure(const std::string& image_dir, const std::string& mask_dir,
                    const std::string& features_dir, const std::string& matches_path);
-
     void open();
-    bool is_open() const { return _open; }
-    void close() { _open = false; }
+    bool is_open() const { return _open || _want_open; }
+    // True on the frame matches.bin was rewritten. Nothing is written while
+    // `busy`: a run may be reading the file.
+    bool draw(bool busy);
 
-    bool draw(PairMatrix& pm, MatchMatrix& mm, PairPreview& preview);
-
-    bool remove_selected_matches(PairMatrix& pm, MatchMatrix& mm, PairPreview& preview);
-    bool undo_removal(PairMatrix& pm, MatchMatrix& mm, PairPreview& preview);
-    bool match_single_pair(uint32_t a, uint32_t b, PairMatrix& pm, MatchMatrix& mm, PairPreview& preview);
-
-    const MatrixSelection& selection() const { return _selection; }
-    void set_selection(const MatrixSelection& sel) { _selection = sel; }
-    bool can_undo() const {
-#ifdef SS_TOOL_SFM
-        return !_undo_stack.empty();
-#else
-        return false;
-#endif
-    }
+    // What draw() does on a click; public for the test. Without a GL context.
+    void select(const MatrixSelection& sel);
+    bool remove_selected();
+    bool undo();
+    bool can_undo() const;
+    bool restore_backup();
+    bool can_restore_backup() const;
+    const PairMatrix& matrix() const { return _mm.matrix(); }
+    const std::string& status() const { return _status; }
 
 private:
-#ifdef SS_TOOL_SFM
-    struct UndoStep {
-        std::vector<sfm::TwoViewMatches> removed;
+    struct PairRef {
+        uint32_t a = 0, b = 0, count = 0;
     };
-    std::vector<UndoStep> _undo_stack;
-#endif
+    struct UndoStep;
 
-    bool _open = false;
-    float _zoom = 1.0f;
-    ImVec2 _pan = {0.0f, 0.0f};
-
-    MatrixSelection _selection;
-    bool _dragging = false;
-    uint32_t _drag_r0 = 0, _drag_c0 = 0;
-    uint32_t _drag_r1 = 0, _drag_c1 = 0;
-
-    bool _panning = false;
-    ImVec2 _pan_start_mouse = {0.0f, 0.0f};
-    ImVec2 _pan_start_pan = {0.0f, 0.0f};
+    void reload();
+    // False, with the undo history dropped, when something else rewrote the file.
+    bool file_is_ours();
+    void show_selected();
+    void close();
 
     std::string _image_dir, _mask_dir, _features_dir, _matches_path;
-    std::vector<std::string> _stems;
+    std::vector<std::string> _names;   // image index -> name, from matches.bin
+    std::vector<PairRef> _pairs;
+    int64_t _stamp = 0;                // matches.bin's mtime as last read
+    MatchMatrix _mm;
+    PairPreview _preview;
+    std::vector<UndoStep> _undo;
 
-    std::vector<std::pair<uint32_t, uint32_t>> _selected_matched_pairs;
-    int _selected_pair_idx = 0;
+    bool _open = false, _want_open = false;
+    float _zoom = 1.0f;
+    ImVec2 _pan = {0.0f, 0.0f};
+    bool _dragging = false, _panning = false;
+    uint32_t _drag_r0 = 0, _drag_c0 = 0, _drag_r1 = 0, _drag_c1 = 0;
+    ImVec2 _pan_start_mouse = {0.0f, 0.0f}, _pan_start = {0.0f, 0.0f};
 
+    MatrixSelection _sel;
+    std::vector<PairRef> _sel_pairs;   // oriented row image first
+    uint64_t _sel_matches = 0;
+    size_t _sel_idx = 0;
     std::string _status;
-
-    void update_selected_pairs(const PairMatrix& pm, PairPreview& preview);
-    uint64_t count_selected_matches(const PairMatrix& pm) const;
-    uint32_t count_selected_pairs(const PairMatrix& pm) const;
 };
 
 }  // namespace gui
-

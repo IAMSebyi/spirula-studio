@@ -64,6 +64,9 @@ void MatchMatrix::clear() {
 
 void MatchMatrix::ensure_texture() {
     if (_m.empty() || !_dirty) return;
+    // Log scale: inlier counts are heavy-tailed -- a handful of adjacent
+    // pairs carry thousands and the loop closures that matter carry tens,
+    // and on a linear ramp the second kind is black.
     const float top = std::log1p((float)_m.peak);
     std::vector<uint8_t> px((size_t)_m.bins * _m.bins * 3);
     for (size_t i = 0; i < (size_t)_m.bins * _m.bins; i++) {
@@ -78,6 +81,8 @@ void MatchMatrix::ensure_texture() {
             continue;
         }
         const float t = top > 0.0f ? std::log1p((float)_m.counts[i]) / top : 0.0f;
+        // Dark blue -> cyan -> white, which keeps the low end visible
+        // against the panel and still separates the top decade.
         px[i * 3 + 0] = (uint8_t)(255.0f * std::max(0.0f, t * 1.6f - 0.6f));
         px[i * 3 + 1] = (uint8_t)(255.0f * std::min(1.0f, t * 1.5f));
         px[i * 3 + 2] = (uint8_t)(255.0f * std::min(1.0f, 0.15f + t * 1.2f));

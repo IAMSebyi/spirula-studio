@@ -121,6 +121,11 @@ void PairPreview::show_pair(uint32_t a, uint32_t b) {
     show(PairBlock{a, a + 1, b, b + 1});
 }
 
+void PairPreview::reload() {
+    std::lock_guard<std::mutex> lk(_mu);
+    _shot.loaded = false;
+}
+
 bool PairPreview::empty() const {
     std::lock_guard<std::mutex> lk(_mu);
     return !_shot.ready;

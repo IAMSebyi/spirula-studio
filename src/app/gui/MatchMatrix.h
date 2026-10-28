@@ -33,12 +33,12 @@ public:
     void destroy_gl();
 
     const PairMatrix& matrix() const { return _m; }
-    PairMatrix& matrix() { return _m; }
-    void mark_dirty() { _dirty = true; }
-    void ensure_texture();
+    // The matrix as a bins x bins RGB texture, built if stale. GL context must be current.
     GLuint texture() { ensure_texture(); return _tex; }
 
 private:
+    void ensure_texture();
+
     PairMatrix _m;
     GLuint _tex = 0;
     bool _dirty = false;

@@ -1,11 +1,16 @@
+// MatchMatrixEditor's file edits without a window: which pairs a selection of
+// cells removes (one image per cell, and blocks of images past
+// kEditorMatrixBins), the backup, and undo restoring the file byte for byte.
+
 #include "app/gui/MatchMatrixEditor.h"
-#include "app/gui/MatchMatrix.h"
-#include "app/gui/PairPreview.h"
 #include "app/gui/SfmProgress.h"
 #include "sfm/core/Matches.h"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -20,142 +25,155 @@ void expect(bool ok, const std::string& what) {
     if (!ok) g_failures++;
 }
 
-sfm::MatchesDatabase make_test_database() {
+std::string slurp(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+void add_pair(sfm::MatchesDatabase& db, uint32_t a, uint32_t b, uint32_t n) {
+    sfm::TwoViewMatches p;
+    p.image1 = a;
+    p.image2 = b;
+    p.config = 2;
+    std::vector<sfm::FeatureMatch> m;
+    for (uint32_t k = 0; k < n; k++) m.push_back({k, k + 1});
+    p.matches = sfm::MatchList(std::move(m));
+    db.pairs.push_back(std::move(p));
+}
+
+sfm::MatchesDatabase chain(uint32_t images) {
     sfm::MatchesDatabase db;
-    for (int i = 0; i < 10; i++) {
-        sfm::ImageEntry e;
-        e.name = "frame_" + std::to_string(i);
-        e.num_features = 500;
-        db.images.push_back(e);
-    }
-    // Sequential pairs along diagonal
-    for (uint32_t i = 0; i < 9; i++) {
-        sfm::TwoViewMatches tvm;
-        tvm.image1 = i;
-        tvm.image2 = i + 1;
-        tvm.config = 1;
-        for (uint32_t k = 0; k < 100; k++) tvm.matches.push_back({k, k});
-        db.pairs.push_back(std::move(tvm));
-    }
-    // Corner loop closure (valid: frame 0 <-> frame 9)
-    {
-        sfm::TwoViewMatches tvm;
-        tvm.image1 = 0;
-        tvm.image2 = 9;
-        tvm.config = 1;
-        for (uint32_t k = 0; k < 60; k++) tvm.matches.push_back({k, k});
-        db.pairs.push_back(std::move(tvm));
-    }
-    // False loop closure in the middle (opposite sides of car: frame 2 <-> frame 7)
-    {
-        sfm::TwoViewMatches tvm;
-        tvm.image1 = 2;
-        tvm.image2 = 7;
-        tvm.config = 1;
-        for (uint32_t k = 0; k < 80; k++) tvm.matches.push_back({k, k});
-        db.pairs.push_back(std::move(tvm));
-    }
+    for (uint32_t i = 0; i < images; i++) db.images.push_back({"frame_" + std::to_string(i), 500});
+    for (uint32_t i = 0; i + 1 < images; i++) add_pair(db, i, i + 1, 100);
     return db;
+}
+
+bool has_pair(const sfm::MatchesDatabase& db, uint32_t a, uint32_t b) {
+    for (const sfm::TwoViewMatches& p : db.pairs)
+        if ((p.image1 == a && p.image2 == b) || (p.image1 == b && p.image2 == a)) return true;
+    return false;
+}
+
+gui::MatrixSelection cells(uint32_t r, uint32_t c) {
+    gui::MatrixSelection s;
+    s.active = true;
+    s.r0 = r;
+    s.r1 = r + 1;
+    s.c0 = c;
+    s.c1 = c + 1;
+    return s;
+}
+
+// Another run writing the file: a later mtime than the editor's own write.
+void rewrite(const fs::path& p, const sfm::MatchesDatabase& db) {
+    sfm::writeMatches(p.string(), db);
+    fs::last_write_time(p, fs::file_time_type::clock::now() + std::chrono::seconds(5));
 }
 
 }  // namespace
 
 int main() {
-    // 1. MatrixSelection logic
-    gui::MatrixSelection sel;
-    expect(!sel.active, "selection initially inactive");
-    sel.r0 = 2; sel.r1 = 4;
-    sel.c0 = 6; sel.c1 = 8;
-    sel.active = true;
-    sel.symmetric = true;
-
-    expect(sel.contains(2, 7), "selection contains cell in box");
-    expect(sel.contains(7, 2), "symmetric selection contains transposed cell");
-    expect(!sel.contains(0, 9), "selection excludes corner loop closure");
-    expect(!sel.contains(1, 2), "selection excludes sequential match");
-
-    sel.symmetric = false;
-    expect(!sel.contains(7, 2), "non-symmetric selection excludes transposed cell");
-
-    // 2. Removal and undo round-trip on matches.bin
-    const fs::path tmp_dir = fs::temp_directory_path() / "spirula_matrix_editor_test";
-    fs::create_directories(tmp_dir);
-    const fs::path matches_path = tmp_dir / "matches.bin";
-
-    sfm::MatchesDatabase db = make_test_database();
-    expect(db.pairs.size() == 11, "database initially has 11 pairs");
-    sfm::writeMatches(matches_path.string(), db);
-
-    gui::PairMatrix pm;
-    int64_t mtime = 0;
-    expect(gui::read_pair_matrix_from_matches(matches_path.string(), mtime, pm),
-           "read pair matrix from generated matches.bin");
-    expect(pm.at(2, 7) == 80, "pair (2, 7) has 80 matches in matrix");
-    expect(pm.at(0, 9) == 60, "pair (0, 9) has 60 matches in matrix");
-
-    gui::MatchMatrix mm;
-    mm.set(pm);
-    gui::PairPreview preview;
-    gui::MatchMatrixEditor editor;
-    editor.configure(tmp_dir.string(), "", "", matches_path.string());
-
-    // Select false match (2, 7)
-    sel.r0 = 2; sel.r1 = 3;
-    sel.c0 = 7; sel.c1 = 8;
-    sel.symmetric = true;
-    sel.active = true;
-    editor.set_selection(sel);
-
-    // Remove false match
-    bool removed = editor.remove_selected_matches(pm, mm, preview);
-    expect(removed, "remove_selected_matches succeeds");
-    expect(editor.can_undo(), "undo is available after removal");
-
-    // Verify disk state
-    sfm::MatchesDatabase db_after = sfm::readMatches(matches_path.string());
-    expect(db_after.pairs.size() == 10, "database now has 10 pairs");
-    bool found_false = false, found_corner = false;
-    for (const auto& p : db_after.pairs) {
-        if ((p.image1 == 2 && p.image2 == 7) || (p.image1 == 7 && p.image2 == 2)) found_false = true;
-        if ((p.image1 == 0 && p.image2 == 9) || (p.image1 == 9 && p.image2 == 0)) found_corner = true;
-    }
-    expect(!found_false, "false loop closure pair (2, 7) was removed");
-    expect(found_corner, "valid corner loop closure pair (0, 9) was preserved");
-    expect(pm.at(2, 7) == 0, "matrix count for removed pair is now 0");
-    expect(pm.at(0, 9) == 60, "matrix count for corner loop closure is still 60");
-
-    // Verify backup created
-    expect(fs::exists(tmp_dir / "matches.bin.bak"), "backup matches.bin.bak created");
-
-    // Undo removal
-    bool undone = editor.undo_removal(pm, mm, preview);
-    expect(undone, "undo succeeds");
-    expect(!editor.can_undo(), "undo stack is now empty");
-
-    sfm::MatchesDatabase db_restored = sfm::readMatches(matches_path.string());
-    expect(db_restored.pairs.size() == 11, "database restored back to 11 pairs");
-    bool found_restored = false;
-    for (const auto& p : db_restored.pairs) {
-        if ((p.image1 == 2 && p.image2 == 7) || (p.image1 == 7 && p.image2 == 2)) found_restored = true;
-    }
-    expect(found_restored, "pair (2, 7) restored on disk");
-    expect(pm.at(2, 7) == 80, "matrix count for pair (2, 7) restored to 80");
-
-    // 3. PairPreview overlay toggles
-    preview.set_show_keypoints(false);
-    expect(!preview.show_keypoints(), "keypoints toggle sets false");
-    preview.set_show_keypoints(true);
-    expect(preview.show_keypoints(), "keypoints toggle sets true");
-
-    preview.set_show_matches(false);
-    expect(!preview.show_matches(), "matches toggle sets false");
-    preview.set_show_matches(true);
-    expect(preview.show_matches(), "matches toggle sets true");
-
+    const fs::path dir = fs::temp_directory_path() / "spirula_match_matrix_editor_test";
     std::error_code ec;
-    fs::remove_all(tmp_dir, ec);
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const fs::path path = dir / "matches.bin";
+    const fs::path bak = dir / "matches.bin.bak";
 
+    {
+        gui::MatrixSelection s = cells(2, 7);
+        expect(s.contains(2, 7) && s.contains(7, 2), "a pair is selected in either order");
+        expect(!s.contains(0, 9) && !s.contains(1, 2), "other cells are not");
+    }
+
+    // One image per cell: the false closure 2-7 goes, the true one 0-9 stays.
+    {
+        sfm::MatchesDatabase db = chain(10);
+        add_pair(db, 0, 9, 60);
+        add_pair(db, 7, 2, 80);   // stored in the order pairing chose
+        sfm::writeMatches(path.string(), db);
+        const std::string original = slurp(path);
+
+        gui::MatchMatrixEditor ed;
+        ed.configure(dir.string(), "", "", path.string());
+        expect(ed.matrix().bins == 10 && ed.matrix().at(2, 7) == 80, "matrix read at one image per cell");
+        ed.select(cells(2, 7));
+        expect(ed.remove_selected(), "remove (2, 7)");
+        const sfm::MatchesDatabase after = sfm::readMatches(path.string());
+        expect(!has_pair(after, 2, 7) && has_pair(after, 0, 9) && after.pairs.size() == 10,
+               "only the false closure is gone");
+        expect(ed.matrix().at(2, 7) == 0 && ed.matrix().at(0, 9) == 60, "matrix follows the file");
+        expect(slurp(bak) == original, "backup is the file before the edit");
+
+        ed.select(cells(0, 1));
+        expect(ed.remove_selected(), "remove (0, 1)");
+        expect(slurp(bak) == original, "backup is not taken again over an edit");
+        expect(ed.undo() && ed.undo() && !ed.can_undo(), "two undos");
+        expect(slurp(path) == original, "undo restores the file byte for byte");
+        expect(!fs::exists(dir / "matches.bin.tmp"), "no temporary left behind");
+
+        // A run that matched again: the backup is retaken, the history dropped.
+        ed.select(cells(0, 1));
+        expect(ed.remove_selected() && ed.can_undo(), "remove before a re-run");
+        sfm::MatchesDatabase rerun = chain(10);
+        add_pair(rerun, 3, 8, 40);
+        rewrite(path, rerun);
+        expect(!ed.undo() && !ed.can_undo(), "undo refused once another run rewrote the file");
+        ed.select(cells(3, 8));
+        expect(ed.remove_selected(), "remove from the re-run's file");
+        expect(has_pair(sfm::readMatches(bak.string()), 3, 8), "backup retaken from the re-run's file");
+    }
+
+    {
+        const std::string original = slurp(bak);
+        gui::MatchMatrixEditor ed;
+        ed.configure(dir.string(), "", "", path.string());
+        expect(!ed.can_undo() && ed.can_restore_backup(), "backup available after reopening without undo history");
+        expect(ed.restore_backup() && slurp(path) == original, "restore backup byte for byte after reopening");
+        expect(slurp(bak) == original, "restore preserves the backup");
+        expect(has_pair(sfm::readMatches(path.string()), 3, 8) && ed.matrix().at(3, 8) == 40,
+               "restored pairs appear in the file and matrix");
+        ed.select(cells(3, 8));
+        expect(ed.remove_selected() && ed.can_undo(), "edit after restoring");
+        expect(ed.restore_backup() && !ed.can_undo(), "restore clears undo history");
+
+        const std::string before = slurp(path);
+        sfm::MatchesDatabase other = chain(10);
+        other.images[0].name = "other";
+        sfm::writeMatches(bak.string(), other);
+        expect(!ed.restore_backup() && slurp(path) == before, "unrelated backup leaves matches untouched");
+        std::ofstream(bak, std::ios::binary | std::ios::trunc) << "bad";
+        expect(!ed.restore_backup() && slurp(path) == before, "corrupt backup leaves matches untouched");
+        fs::remove(bak, ec);
+        expect(!ed.can_restore_backup() && !ed.restore_backup() && slurp(path) == before,
+               "missing backup leaves matches untouched");
+        expect(!fs::exists(dir / "matches.bin.tmp"), "failed restores leave no temporary file");
+    }
+
+    // More images than cells: a cell is a block, and the test is on CELLS.
+    {
+        const uint32_t n = 4100;
+        sfm::MatchesDatabase db = chain(n);
+        add_pair(db, 100, 3000, 50);   // false closure
+        add_pair(db, 49, 1498, 70);    // image numbers equal to that closure's cells
+        sfm::writeMatches(path.string(), db);
+        fs::remove(bak, ec);
+
+        gui::MatchMatrixEditor ed;
+        ed.configure(dir.string(), "", "", path.string());
+        const gui::PairMatrix& pm = ed.matrix();
+        expect(pm.bins == gui::kEditorMatrixBins && pm.n_images == n, "binned past the cap");
+        const uint32_t r = pm.cell_of(3000), c = pm.cell_of(100);
+        expect(r == 1498 && c == 49, "cells of the closure");
+        ed.select(cells(r, c));
+        expect(ed.remove_selected(), "remove the closure's cell");
+        const sfm::MatchesDatabase after = sfm::readMatches(path.string());
+        expect(!has_pair(after, 100, 3000), "closure removed");
+        expect(has_pair(after, 49, 1498), "pair numbered like the cell kept");
+        expect(after.pairs.size() == db.pairs.size() - 1, "nothing else removed");
+    }
+
+    fs::remove_all(dir, ec);
     std::printf("\n%s\n", g_failures == 0 ? "all passed" : "TESTS FAILED");
     return g_failures == 0 ? 0 : 1;
 }
-

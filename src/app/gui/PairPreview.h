@@ -44,6 +44,8 @@ public:
     // them, that holds the most matches -- or its first pair when none does.
     void show(const PairBlock& block);
     void show_pair(uint32_t a, uint32_t b);
+    // Reads the pair on screen again at the next show(): matches.bin changed.
+    void reload();
     bool empty() const;
     void clear();
 

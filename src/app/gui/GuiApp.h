@@ -847,7 +847,6 @@ private:
     FeatureWatcher _features;
     MatchMatrix _matrix;
     MatchMatrixEditor _matrix_editor;
-    PairMatrix _pair_matrix;
     // Every frame a run chose and what the rule made of it (the Sharpness view).
     PickSheet _picks;
     PickSheetView _picks_view;
