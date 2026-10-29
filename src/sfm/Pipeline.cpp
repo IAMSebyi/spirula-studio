@@ -1107,11 +1107,12 @@ RigTable readRigs(const fs::path& dir, Reconstruction& m) {
 // Every reconstruction as <dir>/0, <dir>/1, ... (D41) -- COLMAP's layout for a
 // view graph that is not connected. `sparse/0` has the most 3D points, so a
 // single-model dataset still writes exactly `sparse/0`.
-void writeModels(const std::vector<Reconstruction>& models, const fs::path& dir,
+void writeModels(std::vector<Reconstruction>& models, const fs::path& dir,
                  bool verbose, const std::vector<ModelGauge>& gauge, const RigTable* rigs) {
     for (size_t i = 0; i < models.size(); i++) {
         fs::path p = dir / std::to_string(i);
         fs::create_directories(p);
+        models[i].updatePointErrors();
         models[i].writeBinary(p.string());
         if (i < gauge.size()) writeGauge(p, gauge[i]);
         writeRigs(p, models[i], rigs);
