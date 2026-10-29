@@ -240,15 +240,19 @@ GuiApp::GuiApp() {
         open_pick(PickAction::AddSplatFile, msg::viewer_pick_file.get(),
                   FileDialog::Mode::FileOrFolder, kOpenableExtensions);
     });
-    // An edited dense cloud was re-signed: parse again so the dataset accepts it.
+    // A saved reconstruction or dense seed invalidates the trainer's preview.
     _compare.set_on_model_saved([this](const std::string& saved) {
+        if (_cfg.data.empty()) return;
         std::string dataset;
         spirula::dense::ArtifactFiles files;
         try {
             std::error_code ec;
-            if (!_cfg.data.empty() && spirula::dense::edited_artifact(saved, dataset, files) &&
-                fs::equivalent(dataset, _cfg.data, ec))
+            if (fs::equivalent(saved, _cfg.data, ec) ||
+                (spirula::dense::edited_artifact(saved, dataset, files) &&
+                 fs::equivalent(dataset, _cfg.data, ec))) {
                 _parse_dirty = true;
+                _viewport.invalidate_framing();
+            }
         } catch (const std::exception&) {}
     });
     _compare.set_siblings_of([this](const std::string& path) {
@@ -1203,6 +1207,7 @@ void GuiApp::open_dataset(std::string dir, std::string image_dir,
     // this is where what it left for the screen to read goes.
     reset_dataset_preview();
     close_source_preview();
+    _parse_dirty = false;
     _runner.load_dataset(_cfg, _preset);
     _screen = Screen::Train;
 }

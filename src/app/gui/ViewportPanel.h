@@ -94,6 +94,8 @@ public:
             apply_color_space,
         std::function<void()> on_primitive_changed);
     void detach();
+    // A saved placement can change the frame without changing element counts.
+    void invalidate_framing() { _framed_key.clear(); }
     bool attached() const { return _mode == Mode::Engine; }
 
     // Hide the controls the view link makes shared -- navigation, camera
