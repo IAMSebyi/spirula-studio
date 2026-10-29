@@ -742,9 +742,16 @@ the engine level.
     need workgroup X to be a multiple of the pinned width (VUID-02757;
     same reason the TV/channel-mean 4x4x4 blocks and the single-thread
     reg-loss finals are 64-/32-wide with logical decode / a tid-0 guard).
-    The warp-shuffle block reduce becomes a groupshared tree
-    (`bg_block_add_64`); CUDA's fast/slow writeback three-path split is
-    preserved.
+    `bg_block_add_64` folds across subgroups in shared memory, then finishes
+    with subgroup reads in the shared tree's original addition order.
+    PPISP gathers two neighboring intensity planes per workgroup, sharing
+    each pixel's transform VJP across both planes. The four-plane preload
+    and `ceil(L/2)` host dispatch cover odd and single-layer grids too.
+    Its RGB backward caches the eight corners for the intensity derivative,
+    avoiding a second read/decode. No image-sized scratch is added.
+    RTX 5070, `image_loss_bench bilagrid 4946 3286 40`: 26.184 against
+    35.788 ms, medians of three interleaved pairs (26.8% less time), with
+    identical Vulkan allocation peaks on fixed inputs.
   - **Fused TV-Adam/AdaGrad**: one 256-cell codec block per workgroup;
     Adam moments through QuantizedAdamState<4|8>, the AdaGrad accumulator
     through a new QuantizedTensorLog<4|8> port in optim_quant.slang
@@ -770,21 +777,13 @@ the engine level.
     scatter utils) and `ppisp_parity` (63K tight + 0.9K loose; 3 param
     types x cam_indices on/off + reg fwd/bwd with synthetic deterministic
     bwd inputs). All three devices pass; validation clean.
-  - **PLANNED — backward-implementation selection**: the grid-gradient
-    backward ships only as `*_bwd_v1_grid` (thread-per-cell *gather*), which
-    profiling flags as a consistent top cost on every device (NVIDIA, amdvlk,
-    RADV, Intel, llvmpipe). The plan is to add a thread-per-pixel *scatter*
-    `*_bwd_v2` alternative (the disabled `#if 0` CUDA
-    `BilagridUniformSampleBwdV2_kernel.cuh` revived + a new Slang port) and
-    pick between v1/v2 at runtime with a small **online contextual** selector
-    keyed on `(family, resolution, grid shape)` — reusing vksplat's
-    Gaussian-Thompson-sampling stats but making them per-key, so it needs no
-    offline calibration pass (unlike fused-bilagrid) and does not average over
-    resolutions (unlike vksplat's context-free bandit). When porting v2, the
-    `needs_image_grad` axis is a Slang spec-constant (false for depth/normal,
-    which skip the image-grad scatter — the v2 analogue of the existing
-    `v_in == nullptr` skip), and the grid-fold tail rule + null-`v_in` guard
-    above apply unchanged.
+  - **Backward-implementation selection**: `BilagridBwdSelector.h` keeps
+    contextual online statistics per family, resolution and grid shape.
+    Shipping arms explore v1 target tile sizes 2, 3, 4, 5, 6 and 8.
+    The v2 pixel-scatter kernels are available through `SS_BILAGRID_BWD`
+    but remain opt-in because their atomic contention measured slower.
+    Depth/normal v2 specializes away discarded input gradients; RGB PPISP
+    v2 retains its image-gradient pass.
 - **Multi-scale per-pixel loss stack (phase 5, seventh slice)**:
   `kernels/PerPixelLoss.cpp` mirrors `compute_multi_scale_per_pixel_losses`
   (PerPixelLoss.cu) end to end — pyramid construction, per-scale grad

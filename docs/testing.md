@@ -325,12 +325,21 @@ use the benchmark tools, which fix the workload:
 ```bash
 ./build_vulkan/raster_bench [num_splats] [iters] [macro_log2]   # raster fwd/bwd, binning
 ./build_vulkan/fpbo_bench [num_splats] [iters] [sh_degree] [sb_lobes] [fpbo|qgrad|adam]
+./build_vulkan/image_loss_bench [ssim|ssim_bt|bilagrid] [width] [height] [iters] [dump]
 ```
 
 `fpbo_bench` defaults to fused projection backward and Adam. `qgrad` measures
 the separate quantized projection backward, including gradient clears and
 camera-range preparation; `adam` measures only the separate quantized SH Adam
 update. Both separate modes use the per-cell-block value/state layout.
+
+`image_loss_bench` fixes the images, incoming gradients and PPISP grid.
+`ssim` / `ssim_bt` include the single-scale L1/SSIM loss stack and its
+contrast-structure map; `bilagrid` includes PPISP forward and v1 backward
+with a 16x16x8 fp32 grid and target tile size 4. The optional dump contains
+the RGB gradient followed by the loss map or grid gradient. Non-multiple
+image sizes exercise the tile edges; parity tests additionally cover q16,
+image formats, masks, odd and single-layer grids, and subgroup widths 8–64.
 
 A run that trains also prints a VRAM breakdown after the timing table: pool
 capacity per `VramCategory` (`src/core/PoolSlots.h`), the scratch buffer, the

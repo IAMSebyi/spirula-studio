@@ -40,6 +40,13 @@ reads instead of workgroup staging. Each packed word spans at most four
 lanes, fitting the minimum eight-lane subgroup. Tail lanes contribute zero;
 all lanes still reach the bounds reductions.
 
+The quantized SH Adam pipeline specializes the colour-row stride, so splat
+and cell addressing uses constant integer divisors. The launcher's slice
+alignment and packed storage are unchanged. On an RTX 5070 this measured
+11.645 against 11.982 ms for `fpbo_bench 5000000 40 3 0 adam`, medians of
+three interleaved pairs. The 2.8% gain is modest; bounds, codec arithmetic
+and optimizer precision remain the same.
+
 RTX 5070, 5M splats, SH3, 40 timed calls, medians of three interleaved runs:
 
 | benchmark mode | before (ms/call) | after (ms/call) |

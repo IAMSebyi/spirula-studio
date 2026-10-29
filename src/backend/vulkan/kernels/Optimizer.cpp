@@ -353,13 +353,13 @@ void fused_adam_step_quantized_value(
         }
         p.numel = checked_u32_numel(n, "fused_adam_step_quantized_value");
         p.num_blocks = (uint32_t)((n + 255) / 256);
-        // Spec IDs: 0 = kOptimBits, 1 = kValueBits, 2 = kColorTrust.
+        // Spec IDs: bits, value bits, colour trust, cell stride.
         vkk::Fold f = vkk::fold_1d(n, 256);
         p.wgs_per_row = f.per_row;
         vkk::dispatch_ring(
             "optimizer.fused_adam_qq",
             backend::vk::SpecList{(uint32_t)optim_bits, (uint32_t)value_bits,
-                                  ct},
+                                  ct, p.stride},
             f.per_row, f.rows, 1, &p, sizeof(p));
     }
 }

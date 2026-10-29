@@ -1366,6 +1366,7 @@ void ssim_bt_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID, uniform BtPar
     for (int ci = 0; ci < 3; ci++) {
         float m[BT_NW][5] = {};
         float gb[BT_NW][3];
+        [ForceUnroll]
         for (int pass = 0; pass < 2; pass++) {
             GroupMemoryBarrierWithGroupSync();
             for (int i = int(tid); i < BT_L * BT_L; i += 256) {
@@ -1473,6 +1474,7 @@ void ssim_bt_bwd(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID, uniform BtPar
             for (int j = 0; j < 3; j++) _bt_sm[ADJB + j * BT_S * BT_S + l] = gb[k][j];
         }
         // One branch at a time, so the 24-pixel tile fits 48 KB.
+        [ForceUnroll]
         for (int br = 0; br < 2; br++) {
             GroupMemoryBarrierWithGroupSync();
             const int G = br == 0 ? 0 : ADJB;

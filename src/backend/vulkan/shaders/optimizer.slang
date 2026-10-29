@@ -13,6 +13,8 @@ const int kOptimBits = 8;   // QuantizedAdamState bits: 4 or 8
 const int kValueBits = 8;   // QuantizedTensor value bits: 8 or 16
 [SpecializationConstant]
 const int kColorTrust = 0;  // linear splat colour space (SH cells)
+[SpecializationConstant]
+const uint kOptimStride = 0;
 
 static const float kBeta1 = 0.9f;
 static const float kBeta2 = 0.999f;
@@ -296,6 +298,7 @@ void _qq_store_word<let BITS : int>(uint* packed, uint idx, uint tid,
 [ForceInline]
 void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
     uint3 wg, uint tid, QQAdamParams p) {
+    const uint stride = kOptimStride != 0 ? kOptimStride : p.stride;
     uint blk = wg.y * p.wgs_per_row + wg.x;
     bool blk_ok = blk < p.num_blocks;
     uint idx = blk * 256 + tid;
@@ -303,7 +306,7 @@ void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
 
     float step = float(p.has_steps == 0
                            ? p.scalar_step
-                           : p.steps[min(idx, p.numel - 1) / p.stride]);
+                           : p.steps[min(idx, p.numel - 1) / stride]);
     float ibc1 = 1.0f / (1.0f - pow(kBeta1, step));
     float ibc2 = 1.0f / (1.0f - pow(kBeta2, step));
 
@@ -315,14 +318,14 @@ void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
     float v;
     if (p.grad_quant != 0) {
         float2 gmm =
-            inside ? p.grad_q_bounds[(idx / p.stride) / 256] : float2(0.0f);
+            inside ? p.grad_q_bounds[(idx / stride) / 256] : float2(0.0f);
         v = inside ? gradq8_decode1(p.grad_q_packed, idx, gmm) : 0.0f;
     } else {
         v = inside ? p.grad[idx] : 0.0f;
     }
     if (!_finitef(v)) v = 0.0f;
     v *= p.grad_scale;
-    uint c = min(idx, p.numel - 1) % p.stride;
+    uint c = min(idx, p.numel - 1) % stride;
     bool lobe = c >= p.sb_first;
     if (!lobe)
         v += p.decay *
@@ -331,7 +334,7 @@ void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
     ShColorTrust trust = { 1.0f, 0.0f };
     if (kColorTrust != 0 && inside && !lobe) {
         trust = _sh_color_trust(p.ct_features_dc, p.ct_opacities,
-                                p.ct_eps_tr, idx, p.stride);
+                                p.ct_eps_tr, idx, stride);
         v *= trust.scale;
     }
 
