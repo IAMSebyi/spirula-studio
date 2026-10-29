@@ -98,9 +98,9 @@ int main(int argc, char** argv) {
         return lo + (hi - lo) * (float)(rng() & 0xffffff) / 16777215.0f;
     };
 
-    static constexpr int64_t N = 3000;   // splats
+    static constexpr int64_t N = 3001;   // splats
     static constexpr int64_t S = 3;      // stride
-    static constexpr int64_t NUMEL = N * S;  // 9000 -> 36 blocks, partial tail
+    static constexpr int64_t NUMEL = N * S;  // 9003 cells: partial word and block
 
     std::vector<float> acc;        // float outputs
     std::vector<int32_t> codes;    // quantized-cell codes (tol +-1)

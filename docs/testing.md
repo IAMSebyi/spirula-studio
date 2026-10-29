@@ -324,8 +324,13 @@ use the benchmark tools, which fix the workload:
 
 ```bash
 ./build_vulkan/raster_bench [num_splats] [iters] [macro_log2]   # raster fwd/bwd, binning
-./build_vulkan/fpbo_bench   [num_splats] [iters]                # fused projection bwd + optimizer
+./build_vulkan/fpbo_bench [num_splats] [iters] [sh_degree] [sb_lobes] [fpbo|qgrad|adam]
 ```
+
+`fpbo_bench` defaults to fused projection backward and Adam. `qgrad` measures
+the separate quantized projection backward, including gradient clears and
+camera-range preparation; `adam` measures only the separate quantized SH Adam
+update. Both separate modes use the per-cell-block value/state layout.
 
 A run that trains also prints a VRAM breakdown after the timing table: pool
 capacity per `VramCategory` (`src/core/PoolSlots.h`), the scratch buffer, the

@@ -667,7 +667,9 @@ void fpbo(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         const int sb_c0 = 3 * int(p.sb_base);
 
         if (inside) {
-            for (int j = 0; j < num_sh; ++j) {
+            [ForceUnroll]
+            for (int j = 0; j < kVcMaxShCoeffs; ++j) {
+                if (j >= num_sh) continue;
                 float3 g1v, g2v;
                 [ForceUnroll]
                 for (int ch = 0; ch < 3; ch++) {
@@ -788,7 +790,9 @@ void fpbo(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
         uint* wp_v = elem_at(p.sh_value_packed, sh_base >> 1);
         if (inside) {
             uint pend_s = 0, pend_v = 0, w = 0u;
-            for (int j = 0; j < num_sh; ++j) {
+            [ForceUnroll]
+            for (int j = 0; j < kVcMaxShCoeffs; ++j) {
+                if (j >= num_sh) continue;
                 [ForceUnroll]
                 for (int ch = 0; ch < 3; ++ch) {
                     uint2 q = qadam_quantize_us<8>(u_sh_vals[j][ch],

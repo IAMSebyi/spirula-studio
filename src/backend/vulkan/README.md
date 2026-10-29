@@ -615,7 +615,8 @@ the engine level.
   address locals and the CUDA `_vjp_atomic` variant needs float
   InterlockedAdd, so the VJP accumulates into an `inout float3[24]` and
   callers either keep it in registers or scatter with atomic_add_f32; source
-  coefficients decode once via fp32 or the word-based q8/q16 codec).
+  coefficients are read on demand through the fp32 or word-based q8/q16
+  reader, without retaining a decoded row).
   - `kernels/ProjectionBwd.cpp` + `projection_bwd.slang`
     (projection_{3dgs,mip,3dgut}_backward): one thread per intersection,
     spec axes camera/degree/antialiased/value-bits/packed/viewmat-grad;

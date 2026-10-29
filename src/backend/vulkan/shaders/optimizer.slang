@@ -1,15 +1,5 @@
-// Optimizer kernels (Vulkan backend), mirroring the csrc optimizer family (AdamOptim/Newton/Fused*/TrustRegion*/ColorOptim): fused
-// Adam (fp32, quantized-state, doubly-quantized state+value), AdaGrad, and
-// the small utility kernels (float_add_into, increment_int32). The
-// quantized kernels keep CUDA's launch geometry — one 256-thread workgroup
-// per 256-cell quant block, bounds indexed by the flat workgroup id — with
-// the usual wgs_per_row grid fold. CUDA's warp-shuffle block reductions
-// become the deterministic groupshared reduction in optim_quant.slang, and
-// sub-word packed cells are stored via its cooperative word assembly.
-//
-// The quantized kernels contain barriers, so out-of-range workgroups mask
-// their memory accesses with `inside`/`blk_ok` instead of returning early —
-// every thread reaches every barrier.
+// Portable Adam/AdaGrad and quantized-state optimizers. Quant blocks are
+// 256 cells; tail threads must reach every block reduction.
 
 #define CudaDeviceExport ForceInline
 #include "shaders/pixel_wise.slang"
@@ -287,6 +277,22 @@ struct QQAdamParams {  // 144 bytes: above the push floor, passed by ring
     float sb_lr;
 };
 
+// Each packed word fits within the minimum eight-lane Vulkan subgroup.
+[ForceInline]
+void _qq_store_word<let BITS : int>(uint* packed, uint idx, uint tid,
+                                    bool inside, uint code) {
+    const uint cells = 32u / BITS;
+    uint lane = WaveGetLaneIndex();
+    uint base = lane & ~(cells - 1u);
+    code = inside ? code : 0u;
+    uint word = code;
+    [ForceUnroll]
+    for (uint i = 1; i < cells; ++i)
+        word |= WaveReadLaneAt(code, base + i) << (BITS * i);
+    if ((tid & (cells - 1u)) == 0u && inside)
+        packed[idx / cells] = word;
+}
+
 [ForceInline]
 void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
     uint3 wg, uint tid, QQAdamParams p) {
@@ -356,11 +362,11 @@ void _adam_qq_impl<let OPTIM_BITS : int, let VALUE_BITS : int>(
                : float4(1e30f, -1e30f, 1e30f, -1e30f),
         tid);
 
-    qtensor_store<VALUE_BITS>(p.value_packed, idx, tid, inside,
-                              qtensor_quantize_v<VALUE_BITS>(x, value_mm));
-    qadam_store<OPTIM_BITS>(p.optim_packed, idx, tid, inside,
-                            qadam_quantize_us<OPTIM_BITS>(us.x, us.y,
-                                                          optim_mm_new));
+    uint value_code = qtensor_quantize_v<VALUE_BITS>(x, value_mm);
+    uint2 state_code = qadam_quantize_us<OPTIM_BITS>(us.x, us.y, optim_mm_new);
+    _qq_store_word<VALUE_BITS>(p.value_packed, idx, tid, inside, value_code);
+    _qq_store_word<2 * OPTIM_BITS>(p.optim_packed, idx, tid, inside,
+        state_code.x | (state_code.y << OPTIM_BITS));
     if (tid == 0 && blk_ok) {
         p.value_bounds[blk] = value_mm;
         p.optim_bounds[blk] = optim_mm_new;

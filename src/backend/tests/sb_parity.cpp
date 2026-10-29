@@ -499,7 +499,7 @@ static void run(ColorBasis basis, bool eval3d, const char* cam) {
 }
 
 int main() {
-    const ColorBasis bases[] = {{0, 1}, {0, 2}, {2, 2}, {0, 4}};
+    const ColorBasis bases[] = {{0, 1}, {0, 2}, {2, 2}, {3, 1}, {0, 4}};
     for (const ColorBasis& b : bases) {
         run(b, false, "PINHOLE");
         run(b, false, "FISHEYE");

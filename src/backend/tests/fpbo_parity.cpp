@@ -30,7 +30,7 @@ using backend::MemcpyKind;
 static constexpr int64_t N = 3072;
 static constexpr int64_t C = 2;
 static constexpr uint32_t W = 200, H = 150;
-static constexpr int NUM_SH = 15;
+static constexpr int NUM_SH = 24;
 static constexpr int64_t NB = (N + 255) / 256;
 
 template <typename T>
@@ -180,12 +180,12 @@ int main(int argc, char** argv) {
         {0, false, 0, 1, 3, 0, false, false, false, 31, false, true},
         {1, false, 1, 2, 2, 0, false, true, false, 0, true, false},
         {2, false, 0, 2, 3, 0, false, false, true, 7, false, true},
-        // NOTE: scale-agnostic means x non-SH quant is excluded: the mixed
-        // g1/g2 units make u = g1/sqrt(g2) unbounded for edge splats
-        // (radii 0 with nonzero grad), so +-1 quantum decode differences
-        // amplify chaotically -- inherent to the lossy codec, on CUDA too.
+        // Mixed g1/g2 units make scale-agnostic quantized means unbounded
+        // at radii == 0; a one-code difference amplifies on either backend.
         {0, true, 2, 1, 3, 1, true, false, false, 31, false, false},
         {2, true, 3, 0, 1, 1, false, false, true, 7, false, false},
+        {0, true, 0, 0, 4, 0, false, false, false, 31, false, true},
+        {0, true, 0, 0, 4, 1, true, false, false, 31, false, false},
     };
 
     for (const Cfg& cfg : cfgs) {
