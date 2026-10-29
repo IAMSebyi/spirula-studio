@@ -56,13 +56,16 @@ where plain SSIM fits: 30 KB at a 16x16 tile, 47.7 KB at 24x24. Vulkan takes
 24 where the device has the shared memory, as for plain SSIM; CUDA stays at
 16, where 24 needed 198 registers and ran 10% slower.
 
-Vulkan unrolls the two forward passes and the two adjoint branches, exposing
-constant branch choices while retaining the window arithmetic and shared
-buffer overlays. On an RTX 5070, `image_loss_bench ssim_bt 4946 3286 40`
-measured 36.609 ms against 40.697 ms, medians of three interleaved pairs
-(10.0% less time). At 1237x822 it measured 2.358 against 2.610 ms. Vulkan
-allocation peaks were identical on fixed inputs. The plain SSIM shader
-variants are byte-identical; its timing differences are measurement spread.
+Vulkan unrolls both forward passes and adjoint branches, retaining their
+window arithmetic and shared overlays. Its 24x24 tile uses 512 threads when
+the device's workgroup and pinned-subgroup limits support it, reducing the
+number of window centres each thread retains; 256 threads remain the
+fallback. On an RTX 5070, the L1/blur-tolerant SSIM stack with fp16 render
+and uint8 photo at 4946x3286 measured 31.766 ms against 36.246 ms with 256
+threads, medians of three interleaved pairs (12.4% less time). At 1237x822
+it measured 2.061 against 2.317 ms. Shared storage is unchanged; the final
+scalar reduction reuses dead moment storage. Plain SSIM retains its
+existing shader and workgroup size.
 
 Per loss call at 780x520 on an RTX 3070 Laptop, everything a call runs
 (`compute_multi_scale_per_pixel_losses`, L1 and the `ssim_cs` map),

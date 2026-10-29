@@ -282,6 +282,14 @@ VkPipeline get_pipeline(const std::string& blob_name, const SpecList& spec,
 
 }  // namespace
 
+bool supports_workgroup_size(const char* entry_name, uint32_t threads) {
+    const auto& caps = Context::get().caps();
+    const uint32_t width = subgroup_width(entry_name);
+    return threads <= caps.max_workgroup_invocations &&
+           threads <= caps.max_workgroup_size_x &&
+           (!width || uint64_t(threads) <= uint64_t(width) * caps.max_workgroup_subgroups);
+}
+
 namespace {
 
 // Shared by dispatch() and dispatch_range(): `base` null is a plain launch.

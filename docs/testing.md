@@ -323,9 +323,9 @@ hold to ~1%, so they can be A/B'd from a training run directly; for the rest
 use the benchmark tools, which fix the workload:
 
 ```bash
-./build_vulkan/raster_bench [num_splats] [iters] [macro_log2]   # raster fwd/bwd, binning
+./build_vulkan/raster_bench [num_splats] [iters] [macro_log2] [cut] [scene] [2d|3dgut] [width] [height] [dist] [dump|-] [depth_grad]
 ./build_vulkan/fpbo_bench [num_splats] [iters] [sh_degree] [sb_lobes] [fpbo|qgrad|adam]
-./build_vulkan/image_loss_bench [ssim|ssim_bt|bilagrid] [width] [height] [iters] [dump]
+./build_vulkan/image_loss_bench [mode] [width] [height] [iters] [dump]
 ```
 
 `fpbo_bench` defaults to fused projection backward and Adam. `qgrad` measures
@@ -333,13 +333,32 @@ the separate quantized projection backward, including gradient clears and
 camera-range preparation; `adam` measures only the separate quantized SH Adam
 update. Both separate modes use the per-cell-block value/state layout.
 
-`image_loss_bench` fixes the images, incoming gradients and PPISP grid.
-`ssim` / `ssim_bt` include the single-scale L1/SSIM loss stack and its
-contrast-structure map; `bilagrid` includes PPISP forward and v1 backward
-with a 16x16x8 fp32 grid and target tile size 4. The optional dump contains
-the RGB gradient followed by the loss map or grid gradient. Non-multiple
-image sizes exercise the tile edges; parity tests additionally cover q16,
-image formats, masks, odd and single-layer grids, and subgroup widths 8–64.
+`raster_bench` fixes projection, intersections, forward state and incoming
+pixel gradients. `scene` selects `mixed`, `tiny`, `large`, `heavy_tail`,
+`clustered` or `transparent`; it prints tile-list length percentiles.
+`dist` is 0 (off), 1 (depth) or 2 (depth and RGB); `cut` selects the 2D
+kernel cutoff. Backward timings include accumulation weights, with a
+separate measurement enabling the maximum-weight output. The optional dump
+contains world gradients, screen gradients, accumulation weights and maximum
+weights. `depth_grad=0` omits the incoming render-depth gradient; distortion
+gradients remain independent. Use `-` to omit the dump when setting this flag.
+Each stage warms the device for at least 100 ms after lazy pipeline creation.
+Sweep both primitives and distortion settings when changing the
+raster schedule; a speedup on one footprint distribution is insufficient.
+
+`image_loss_bench` fixes images, incoming gradients and a 16x16x8 grid.
+Modes `ssim` / `ssim_bt` include the single-scale L1/SSIM loss stack and its
+contrast-structure map; `_u8` and `_f16_u8` suffixes select image formats.
+`bilagrid` uses the PPISP grid sampler, `affine` the affine sampler; `_q16`
+selects quantized cells. Both include forward and v1 backward with target
+tile size 4. `ppisp:<type>` measures standalone PPISP, and
+`appearance:<type>` measures the background/color-space/PPISP chain;
+`appearance:off` disables PPISP. Types include `no_crf_no_vig`, `no_crf`,
+`original` and `rqs`. The dump contains the RGB gradient followed by the
+loss map, grid gradient, or PPISP parameter gradient (and transmittance
+gradient for the appearance chain). Non-multiple image sizes exercise tile
+edges; parity tests additionally cover masks, odd and single-layer grids,
+multiple cameras and subgroup widths 8–64.
 
 A run that trains also prints a VRAM breakdown after the timing table: pool
 capacity per `VramCategory` (`src/core/PoolSlots.h`), the scratch buffer, the

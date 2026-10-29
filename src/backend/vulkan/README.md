@@ -595,17 +595,27 @@ the engine level.
   barrier), ballot compaction -> WavePrefixCountBits + per-wave totals in
   groupshared, float atomicAdd/atomicMax -> atomic_add_f32 CAS loop /
   atomic_max_f32 signed-int-max trick (atomic_float.slang) with CUDA's
-  isfinite filter. Six spec-constant axes (camera, dist, median,
-  accum-weight, viewmat-grad, packed). The 2D fragment vjp math is ported
+  isfinite filter. Seven spec-constant axes (camera, dist, median,
+  accum-weight, viewmat-grad, packed, max-weight). The 2D fragment vjp math is ported
   inline; 3DGUT goes through the evaluate_{alpha,color}_3dgs_vjp +
   compute_3dgut_iscl_rot_vjp slang exports. `raster_bwd_parity` builds real
-  forward state through the ported projection/intersect/raster-fwd chain,
-  then compares 285k gradient floats over 5 configs: NVIDIA 1 violation
-  (0.0004%); Intel/llvmpipe ~0.05% — verified to be inherited upstream
-  near-tie blend-order flips, not a port defect, by comparing those devices
-  against an NVIDIA-Vulkan dump of the SAME shader (identical diffs).
-  Note: Primitive.cuh zeros_pool had a leftover raw cudaMemset (host code)
-  -> backend::memset_sync (both backends re-verified).
+  forward state through projection/intersect/raster-forward, then compares
+  1.06 million gradient floats across 18 configurations, including absent
+  depth gradients, distortion, median depth, packed rows, camera gradients,
+  cutoff kernels and maximum weights. Tolerance caps account for atomic
+  accumulation order and upstream near-tie blend-order differences.
+  `rasterize_bwd_nodepth.slang` compiles the shared raster body with
+  `SS_RASTER_NODEPTH`, specializing away the depth VJP when render-depth gradients,
+  distortion and median depth are all absent. Selection uses those bindings,
+  with no footprint or tile-list heuristic. Both entries keep the same
+  compositing order and buffers. The existing 2D and full 3DGUT modules
+  remain byte-identical, including their atomic and int64 variants.
+  RTX 5070, three interleaved pairs with 100 ms warmup per stage: the
+  depth-free entry reduces backward time 5.3–21.3% across tiny, large,
+  mixed, heavy-tail, clustered and transparent splats at 1237x822.
+  A 2M-splat mixed case takes 2.085 ms against 2.495 ms (16.4% less).
+  The same trained bicycle model and fixed full-resolution camera allocate
+  1,735,471,680 bytes with either build (1585.97 MiB pool plus scratch).
 - **Projection backward family (phase 5, fourth slice)**: three kernels over
   shared machinery in `proj_bwd_common.slang` (splat/camera loaders, the
   per-intersection projection VJP wrappers over the primitive_3dgs.slang
@@ -752,6 +762,15 @@ the engine level.
     RTX 5070, `image_loss_bench bilagrid 4946 3286 40`: 26.184 against
     35.788 ms, medians of three interleaved pairs (26.8% less time), with
     identical Vulkan allocation peaks on fixed inputs.
+  - Standalone PPISP and the appearance chain unroll parameter reduction
+    over the fixed maximum layout. `ppisp_reduce.slang` finishes the shared
+    binary tree with subgroup reads in the original addition order, using
+    the same shared scratch. RTX 5070, 1237x822, medians of three interleaved
+    pairs: standalone PPISP takes 0.180–0.440 ms against 0.321–0.704 ms;
+    the appearance chain takes 0.216–0.988 ms against 0.321–1.459 ms,
+    across 9-, 24-, 36- and 39-parameter layouts. The default 9-parameter
+    chain at 4946x3286 takes 3.471 ms against 5.173 ms. Affine-only and
+    grid-only samplers retain their existing implementations.
   - **Fused TV-Adam/AdaGrad**: one 256-cell codec block per workgroup;
     Adam moments through QuantizedAdamState<4|8>, the AdaGrad accumulator
     through a new QuantizedTensorLog<4|8> port in optim_quant.slang
@@ -815,6 +834,12 @@ the engine level.
     The `ssim_bt_*` entries are blur-tolerant SSIM: a blur pass, the fused
     kernel on SSIM's tile (30 KB at 16, 47.7 KB at 24), and the blur's
     adjoint (`docs/notes/ssim-blur-tolerance.md`).
+    Its 24x24 backward tile uses 512 threads when the device's workgroup
+    and pinned-subgroup limits permit it, reducing live window state per
+    thread. The 256-thread variant remains the portable fallback;
+    `SS_VK_SSIM_THREADS=256|512` overrides selection for comparisons.
+    Both use the same shared allocation; scalar reduction reuses the dead
+    moment buffer rather than enlarging the loss-map buffer.
   - `canny.slang` (canny rgb/scalar + BT.601 residual luma + Tukey
     biweight) with globally-clamped loads -> per-pixel deterministic, so
     even the RobustEdgeAware densification map compares tight.
