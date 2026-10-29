@@ -33,6 +33,7 @@
 #include "core/ColorSpace.h"
 #include "core/Env.h"
 #include "core/ExrImage.h"
+#include "core/HardwareThreads.h"
 #include "sfm/SfmConfig.h"
 #include "sfm/core/Cancel.h"
 #include "sfm/core/Manifest.h"
@@ -825,7 +826,7 @@ static int cmdMap(int argc, char** argv) {
         // Descriptors are skipped: matching is over, and on a 5000-image
         // capture they are several gigabytes of file that nothing downstream
         // reads. Parallel because it is pure per-file work landing by index.
-        const unsigned hc = std::thread::hardware_concurrency();
+        const unsigned hc = spirula::hardware_threads();
         int nt = cfg.threads > 0 ? cfg.threads : (hc > 0 ? (int)hc : 1);
         nt = std::max(1, std::min<int>(nt, (int)db.images.size()));
         std::atomic<size_t> next{0};

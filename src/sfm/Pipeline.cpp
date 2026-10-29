@@ -31,6 +31,7 @@
 
 #include "core/ColorSpace.h"
 #include "core/Env.h"
+#include "core/HardwareThreads.h"
 #include "core/ImageFile.h"
 #include "sfm/core/Cancel.h"
 #include "sfm/core/Events.h"
@@ -577,7 +578,7 @@ void calibrateSensorPriorsFrom(TelemetryPriors& priors, const std::vector<Featur
             ok[k] = 1;
         }
     };
-    const unsigned hc = std::thread::hardware_concurrency();
+    const unsigned hc = spirula::hardware_threads();
     const int nt = std::max(1, std::min<int>(threads > 0 ? threads : (hc ? (int)hc : 1),
                                              (int)std::max<size_t>(use.size(), 1)));
     std::vector<std::thread> pool;
@@ -1875,7 +1876,7 @@ int loadFeatureDir(const std::string& featdir, const SfmConfig& cfg, bool with_d
     db.images.resize(files.size());
     events::stage_begin(Stage::Load, (int64_t)files.size());
     {
-        const unsigned hc = std::thread::hardware_concurrency();
+        const unsigned hc = spirula::hardware_threads();
         int nt = cfg.threads > 0 ? cfg.threads : (hc > 0 ? (int)hc : 1);
         nt = std::max(1, std::min<int>(nt, (int)files.size()));
         std::atomic<size_t> next{0}, done{0};

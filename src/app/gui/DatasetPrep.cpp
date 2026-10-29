@@ -18,6 +18,7 @@
 #include "app/gui/PickSheet.h"
 #include "app/gui/Subprocess.h"
 
+#include "core/HardwareThreads.h"
 #include "core/ImageFile.h"
 #include "core/ImageOrient.h"
 #include "sfm/core/Exif.h"
@@ -2179,7 +2180,7 @@ bool warp_canvases(const fs::path& from, const fs::path& to,
         if (e.is_regular_file(ec)) files.push_back(e.path());
     std::sort(files.begin(), files.end());
 
-    const int cores = std::max(1, (int)std::thread::hardware_concurrency());
+    const int cores = std::max(1, (int)spirula::hardware_threads());
     const int per_view = std::max(1, cores / (int)views.size());
     int64_t done = 0;
     for (const fs::path& f : files) {
@@ -3077,7 +3078,7 @@ bool DatasetPrep::gather_photos(const PrepJob& job, const PrepInput& in,
         // Copying and moving are the disk's work, so one thread; the re-encode
         // is the CPU's, ~60 ms a photo (1.4 s for a 24 MP HEIC). Each worker holds a
         // decoded frame that glibc faults in on every call: 24 MB at 4K, ~320 MB .insp.
-        const unsigned cores = std::thread::hardware_concurrency();
+        const unsigned cores = spirula::hardware_threads();
         const int threads =
             convert || any_split || any_heif
                 ? (int)std::clamp<unsigned>(cores ? cores : 1u, 1u, any_split ? 4u : 8u)
@@ -3205,7 +3206,7 @@ bool DatasetPrep::split_packed_frames(const PrepInput& in,
                 error = fmt(lmsg::err_packed_split_failed, {f.string()});
         }
     };
-    const unsigned cores = std::thread::hardware_concurrency();
+    const unsigned cores = spirula::hardware_threads();
     const int threads = (int)std::clamp<unsigned>(cores ? cores : 1u, 1u, 8u);
     std::vector<std::thread> pool;
     for (int t = 1; t < threads; t++) pool.emplace_back(worker);

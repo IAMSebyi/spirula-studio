@@ -3,6 +3,7 @@
 #include "app/CubeLut.h"
 
 #include "app/LogLuts.h"
+#include "core/HardwareThreads.h"
 
 #include <algorithm>
 #include <charconv>
@@ -276,7 +277,7 @@ struct CubeSampler {
 
 template <typename Run>
 void map_pixels(size_t pixels, int threads, const Run& run) {
-    int t = threads > 0 ? threads : (int)std::max(1u, std::thread::hardware_concurrency());
+    int t = threads > 0 ? threads : (int)std::max(1u, spirula::hardware_threads());
     t = (int)std::min<size_t>((size_t)t, std::max<size_t>(1, pixels / 65536));
     if (t <= 1) {
         run(0, pixels);

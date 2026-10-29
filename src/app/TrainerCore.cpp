@@ -3,6 +3,7 @@
 #include "app/TrainerCore.h"
 #include "backend/api/BackendRuntime.h"
 #include "core/Env.h"
+#include "core/HardwareThreads.h"
 #include "core/SphericalBeta.h"
 #include "core/Tensor.h"
 #include "data/SceneTransform.h"
@@ -2131,7 +2132,7 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
         : (int64_t)eds.widths[0] * eds.heights[0];
     const int64_t bytes_per_view = view_pixels * (3 * 3 * 4 + 11 * 8);
     const int64_t kBudget = (int64_t)4 << 30;
-    int n_workers = (int)std::max(1u, std::thread::hardware_concurrency() / 4u);
+    int n_workers = (int)std::max(1u, spirula::hardware_threads() / 4u);
     n_workers = (int)std::min<int64_t>(n_workers,
                                        std::max<int64_t>(1, kBudget / std::max<int64_t>(bytes_per_view, 1)));
     n_workers = std::min<int>(n_workers, 8);
@@ -2215,7 +2216,7 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
             // Threads inside the metrics would oversubscribe against the pool;
             // the per-view work is already the coarser and cheaper split.
 #ifdef _OPENMP
-            omp_set_num_threads(std::max(1, (int)std::thread::hardware_concurrency() / n_workers));
+            omp_set_num_threads(std::max(1, (int)spirula::hardware_threads() / n_workers));
 #endif
             for (;;) {
                 ViewJob job;

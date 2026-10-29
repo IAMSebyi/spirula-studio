@@ -11,6 +11,7 @@
 #include "app/FrameMotion.h"
 #include "app/WriterPool.h"
 #include "app/gui/Subprocess.h"
+#include "core/HardwareThreads.h"
 #include "i18n/catalog/Data.h"
 #include "i18n/catalog/Log.h"
 #include "nn/core/Log.h"
@@ -429,7 +430,7 @@ bool extract_frames(const FrameExtractJob& job_in, const FrameExtractSinks& sink
 
     stats.encoder_threads =
         job.threads > 0 ? job.threads
-                        : std::max(1, (int)std::thread::hardware_concurrency() - 1);
+                        : std::max(1, (int)spirula::hardware_threads() - 1);
     WriterPool pool(stats.encoder_threads);
 
     const fs::path base(job.image_dir);
