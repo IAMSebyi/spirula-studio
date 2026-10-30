@@ -11707,16 +11707,21 @@ void GuiApp::draw_metrics() {
     if (pts.empty()) return;
 
     ui::SeparatorText(msg::section_metrics);
-    // Downsample to <= 240 plot points.
     int stride = std::max<size_t>(1, pts.size() / 240);
-    static std::vector<float> steps, psnr, splats;
+    static std::vector<float> steps, values;
     steps.clear();
-    psnr.clear();
-    splats.clear();
+    values.clear();
+    auto value = [&](const TrainRunner::MetricPoint& p) {
+        switch (_plot_metric) {
+            case PlotMetric::Ssim: return p.ssim;
+            case PlotMetric::Loss: return p.rgb_loss;
+            case PlotMetric::LogLoss: return p.rgb_loss;
+            default: return p.psnr;
+        }
+    };
     auto take = [&](size_t i) {
         steps.push_back((float)pts[i].step);
-        psnr.push_back(pts[i].psnr);
-        splats.push_back(pts[i].num_splats);
+        values.push_back(value(pts[i]));
     };
     size_t last_i = 0;
     for (size_t i = 0; i < pts.size(); i += stride) { take(i); last_i = i; }
@@ -11724,32 +11729,44 @@ void GuiApp::draw_metrics() {
     // leaves the curve ending before the score printed beside it.
     if (last_i != pts.size() - 1) take(pts.size() - 1);
     const auto& last = pts.back();
-    // PSNR / SSIM / loss are the metric names the literature and the logs use;
-    // they are not translated, only the numbers change.
-    ui::PlotLinesRaw(steps.data(), psnr.data(), (int)psnr.size(),
-                     ImVec2(-8, px(64.0f)));
-    // The score, placed in the plot's own rectangle rather than handed to
-    // PlotLines as its overlay: that one is drawn against the TOP of the
-    // frame, and the leading blank lines that used to push it down vanished
-    // whenever a larger interface size made them taller than the frame.
+    ui::PlotLinesRaw(steps.data(), values.data(), (int)values.size(),
+                     ImVec2(-8, px(64.0f)), _plot_metric == PlotMetric::LogLoss);
     {
-        char v[32];
-        std::snprintf(v, sizeof v, "PSNR %.2f", last.psnr);
+        char v[128];
+        const char* label = _plot_metric == PlotMetric::Psnr ? "PSNR"
+                          : _plot_metric == PlotMetric::Ssim ? "SSIM"
+                          : msg::metric_loss.get();
+        std::snprintf(v, sizeof v, "%s %.*f", label,
+                      _plot_metric == PlotMetric::Psnr ? 2 : 4, value(last));
         const ImVec2 lo = ImGui::GetItemRectMin();
         const ImVec2 hi = ImGui::GetItemRectMax();
         const ImVec2 sz = ImGui::CalcTextSize(v);
         const float pad = ImGui::GetStyle().FramePadding.y;
         const ImVec2 at(std::max(lo.x, (lo.x + hi.x - sz.x) * 0.5f),
-                        std::max(lo.y, hi.y - sz.y - pad));
+            _plot_metric == PlotMetric::Loss || _plot_metric == PlotMetric::LogLoss ?
+                lo.y : std::max(lo.y, hi.y - sz.y - pad));
         ImGui::GetWindowDrawList()->AddText(
             at, ImGui::GetColorU32(ImGuiCol_Text), v);
     }
-    char line[96];
-    std::snprintf(line, sizeof line, "%.3f", last.ssim);
+    if (ImGui::BeginPopupContextItem("##training_metric")) {
+        if (ui::MenuItemRaw("PSNR", _plot_metric == PlotMetric::Psnr))
+            _plot_metric = PlotMetric::Psnr;
+        if (ui::MenuItemRaw("SSIM", _plot_metric == PlotMetric::Ssim))
+            _plot_metric = PlotMetric::Ssim;
+        if (ui::MenuItem(msg::metric_loss, nullptr, _plot_metric == PlotMetric::Loss))
+            _plot_metric = PlotMetric::Loss;
+        if (ui::MenuItem(msg::metric_loss_log, nullptr, _plot_metric == PlotMetric::LogLoss))
+            _plot_metric = PlotMetric::LogLoss;
+        ImGui::EndPopup();
+    }
+    char psnr[96];
+    std::snprintf(psnr, sizeof psnr, "%.2f", last.psnr);
+    char ssim[96];
+    std::snprintf(ssim, sizeof ssim, "%.3f", last.ssim);
     char loss[96];
     std::snprintf(loss, sizeof loss, "%.4f", last.rgb_loss);
     ui::TextWrapped(msg::status_metrics,
-                    {format_count(last.num_splats), line, loss});
+                    {format_count(last.num_splats), psnr, ssim, loss});
 }
 
 // The bar is the trainer's own time forecast, so a run whose steps get dearer

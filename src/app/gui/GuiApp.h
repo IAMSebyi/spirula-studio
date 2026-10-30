@@ -789,6 +789,8 @@ private:
     bool _preset_delete_shown = false;
 
     TrainRunner _runner;
+    enum class PlotMetric { Psnr, Ssim, Loss, LogLoss };
+    PlotMetric _plot_metric = PlotMetric::Psnr;
     ViewportPanel _viewport;
     // The trainer screen's other preview: one training photograph beside the
     // render of the same camera. Reads from the session's engine, so it is

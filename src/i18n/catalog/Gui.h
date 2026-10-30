@@ -2686,20 +2686,31 @@ SS_MSG(status_idle,
 
 // The metric names are the ones the literature and the logs use; only the
 // labelling around them changes.
+SS_MSG(metric_loss,
+    EN("Loss"), JA("損失"), ZH_HANS("损失"), ZH_HANT("損失"),
+    KO("손실"), DE("Verlust"), FR("Perte"), ES("Pérdida"),
+    PT("Perda"), IT("Perdita"), NL("Verlies"), RU("Потери"), TR("Kayıp"));
+
+SS_MSG(metric_loss_log,
+    EN("Loss (log)"), JA("損失 (対数)"), ZH_HANS("损失 (对数)"), ZH_HANT("損失 (對數)"),
+    KO("손실 (로그)"), DE("Verlust (log)"), FR("Perte (log)"), ES("Pérdida (log)"),
+    PT("Perda (log)"), IT("Perdita (log)"), NL("Verlies (log)"), RU("Потери (лог)"),
+    TR("Kayıp (log)"));
+
 SS_MSG(status_metrics,
-    EN("splats: {0}   ssim: {1}   loss: {2}"),
-    JA("スプラット: {0}   ssim: {1}   損失: {2}"),
-    ZH_HANS("泼溅数：{0}   ssim：{1}   损失：{2}"),
-    ZH_HANT("潑濺數：{0}   ssim：{1}   損失：{2}"),
-    KO("스플랫: {0}   ssim: {1}   손실: {2}"),
-    DE("Splats: {0}   ssim: {1}   Verlust: {2}"),
-    FR("splats : {0}   ssim : {1}   perte : {2}"),
-    ES("splats: {0}   ssim: {1}   pérdida: {2}"),
-    PT("splats: {0}   ssim: {1}   perda: {2}"),
-    IT("splat: {0}   ssim: {1}   perdita: {2}"),
-    NL("splats: {0}   ssim: {1}   verlies: {2}"),
-    RU("сплатов: {0}   ssim: {1}   потери: {2}"),
-    TR("splat: {0}   ssim: {1}   kayıp: {2}"));
+    EN("splats: {0}   psnr: {1}   ssim: {2}   loss: {3}"),
+    JA("スプラット: {0}   psnr: {1}   ssim: {2}   損失: {3}"),
+    ZH_HANS("泼溅数：{0}   psnr: {1}   ssim：{2}   损失：{3}"),
+    ZH_HANT("潑濺數：{0}   psnr: {1}   ssim：{2}   損失：{3}"),
+    KO("스플랫: {0}   psnr: {1}   ssim: {2}   손실: {3}"),
+    DE("Splats: {0}   psnr: {1}   ssim: {2}   Verlust: {3}"),
+    FR("splats : {0}   psnr: {1}   ssim : {2}   perte : {3}"),
+    ES("splats: {0}   psnr: {1}   ssim: {2}   pérdida: {3}"),
+    PT("splats: {0}   psnr: {1}   ssim: {2}   perda: {3}"),
+    IT("splat: {0}   psnr: {1}   ssim: {2}   perdita: {3}"),
+    NL("splats: {0}   psnr: {1}   ssim: {2}   verlies: {3}"),
+    RU("сплатов: {0}   psnr: {1}   ssim: {2}   потери: {3}"),
+    TR("splat: {0}   psnr: {1}   ssim: {2}   kayıp: {3}"));
 
 SS_MSG(vram_help,
     EN("GPU memory (GiB): used by this process / total in use system-wide / "
