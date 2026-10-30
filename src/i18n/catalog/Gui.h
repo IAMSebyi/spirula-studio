@@ -4558,32 +4558,32 @@ SS_MSG(compare_wipe,
     TR("Perde"));
 
 SS_MSG(compare_wipe_help,
-    EN("The first two models in one pane on one camera, the second shown right "
-       "of a divider. Drag the divider to move it."),
-    JA("最初の2つのモデルを同じカメラで1つのペインに重ね、2つ目を境界線の右側に"
-       "表示します。境界線はドラッグで動かせます。"),
-    ZH_HANS("前两个模型用同一台相机叠在一个窗格里，第二个显示在分界线右侧。"
-            "拖动分界线即可移动。"),
-    ZH_HANT("前兩個模型用同一台相機疊在一個窗格裡，第二個顯示在分界線右側。"
-            "拖動分界線即可移動。"),
-    KO("처음 두 모델을 같은 카메라로 한 창에 겹쳐, 두 번째 모델을 경계선 오른쪽에 "
-       "보여 줍니다. 경계선은 끌어서 옮깁니다."),
-    DE("Die ersten beiden Modelle in einem Bereich mit einer Kamera, das zweite "
-       "rechts einer Trennlinie. Die Linie lässt sich ziehen."),
-    FR("Les deux premiers modèles dans un volet, sur une caméra, le second à "
-       "droite d'une ligne. Faites glisser la ligne pour la déplacer."),
-    ES("Los dos primeros modelos en un panel con una cámara, el segundo a la "
-       "derecha de una línea. Arrastra la línea para moverla."),
-    PT("Os dois primeiros modelos num painel com uma câmera, o segundo à direita "
-       "de uma linha. Arraste a linha para movê-la."),
-    IT("I primi due modelli in un riquadro con una telecamera, il secondo a "
-       "destra di una linea. Trascina la linea per spostarla."),
-    NL("De eerste twee modellen in één venster met één camera, het tweede rechts "
-       "van een scheidslijn. Sleep de lijn om hem te verplaatsen."),
-    RU("Первые две модели в одной панели с одной камерой, вторая справа от "
-       "линии. Линию можно перетаскивать."),
-    TR("İlk iki model tek bölmede, tek kamerayla; ikincisi bir çizginin sağında. "
-       "Çizgiyi sürükleyerek taşıyın."));
+    EN("Show all open models in one pane with one camera. Drag the dividers to "
+       "adjust each model's section."),
+    JA("開いているすべてのモデルを同じカメラで1つのペインに表示します。"
+       "境界線をドラッグして各モデルの表示範囲を調整できます。"),
+    ZH_HANS("在一个窗格中用同一台相机显示所有已打开的模型。"
+            "拖动分界线可调整各模型的显示范围。"),
+    ZH_HANT("在一個窗格中用同一台相機顯示所有已開啟的模型。"
+            "拖動分界線可調整各模型的顯示範圍。"),
+    KO("열린 모든 모델을 같은 카메라로 한 창에 표시합니다. "
+       "경계선을 끌어서 각 모델의 표시 영역을 조절합니다."),
+    DE("Alle geöffneten Modelle in einem Bereich mit einer Kamera anzeigen. "
+       "Die Trennlinien ziehen, um den Bereich jedes Modells anzupassen."),
+    FR("Afficher tous les modèles ouverts dans un volet avec une seule caméra. "
+       "Faites glisser les séparateurs pour ajuster la zone de chaque modèle."),
+    ES("Muestra todos los modelos abiertos en un panel con una cámara. "
+       "Arrastra los separadores para ajustar la sección de cada modelo."),
+    PT("Mostra todos os modelos abertos num painel com uma câmera. "
+       "Arraste as divisórias para ajustar a seção de cada modelo."),
+    IT("Mostra tutti i modelli aperti in un riquadro con una telecamera. "
+       "Trascina i divisori per regolare la sezione di ogni modello."),
+    NL("Toon alle geopende modellen in één venster met één camera. "
+       "Sleep de scheidingslijnen om het deel van elk model aan te passen."),
+    RU("Все открытые модели в одной панели с одной камерой. "
+       "Перетаскивайте разделители, чтобы настроить область каждой модели."),
+    TR("Açık tüm modelleri tek bölmede, tek kamerayla gösterin. "
+       "Her modelin alanını ayarlamak için ayırıcıları sürükleyin."));
 
 SS_MSG(compare_placement_help,
     EN("Where this model sits, and where its pane is."),

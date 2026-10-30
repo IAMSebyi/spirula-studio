@@ -113,10 +113,13 @@ public:
                      int& camera_model, float eye[3]) const;
     // Where the last draw put the image on screen, in ImGui coordinates.
     void image_rect(float& x, float& y, float& w, float& h) const;
-    // Wipe: `other`'s last render drawn over this image right of `*split`
-    // (0..1 across), with a draggable divider. Null `other` turns it off.
-    void set_wipe(const ViewportPanel* other, float* split,
-                  std::string left = {}, std::string right = {});
+    struct WipeSource {
+        const ViewportPanel* panel;
+        std::string name;
+    };
+    // Sources include this panel first. Four sources use X/Y splits;
+    // otherwise splits are ordered fractions across the image.
+    void set_wipe(std::vector<WipeSource> sources = {}, std::vector<float>* splits = nullptr);
     void render_only(const ImVec2& avail);
     void last_avail(float& w, float& h) const { w = _last_avail_w; h = _last_avail_h; }
     // The same pose in the SHARED frame the camera navigates, which is where
@@ -322,10 +325,9 @@ private:
     void draw_preview(const ImVec2& avail);
     void draw_wipe(const ImVec2& tl, const ImVec2& size) const;
     bool wipe_input(const ImVec2& tl, const ImVec2& size);
-    const ViewportPanel* _wipe_src = nullptr;
-    float* _wipe_split = nullptr;
-    std::string _wipe_left, _wipe_right;
-    bool _wipe_drag = false;
+    std::vector<WipeSource> _wipe_sources;
+    std::vector<float>* _wipe_splits = nullptr;
+    int _wipe_drag = -1;
     float _last_avail_w = 0.0f, _last_avail_h = 0.0f;
     unsigned _preview_tex = 0;
 

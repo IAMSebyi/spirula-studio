@@ -1097,9 +1097,9 @@ void CompareView::draw(float height) {
 
     const ImGuiStyle& st = ImGui::GetStyle();
     const bool wipe = _wipe && n >= 2 && _edit_index < 0 && _render_index < 0 &&
-                      _models[0]->attached && _models[1]->attached;
+        std::all_of(_models.begin(), _models.end(), [](const auto& m) { return m->attached; });
     // Clearing the active pane's wipe would end its divider drag.
-    for (int i = wipe ? 1 : 0; i < n; ++i) _models[i]->panel.set_wipe(nullptr, nullptr);
+    for (int i = wipe ? 1 : 0; i < n; ++i) _models[i]->panel.set_wipe();
     // Rendering: the primary pane, and the camera's own view where the
     // render panel asks for it. The other models are sources, not panes.
     if (_render_index >= 0 && _render_index < n) {
@@ -1138,17 +1138,27 @@ void CompareView::draw(float height) {
     }
     if (wipe) {
         Model& a = *_models[0];
-        Model& b = *_models[1];
-        auto name = [](Model& m) -> std::string {
-            if (m.title) return std::string(m.title->get());
-            return display_name(m.src.file().empty() ? m.path : m.src.file());
-        };
-        a.panel.set_wipe(&b.panel, &_wipe_split, name(a), name(b));
+        if (_wipe_count != n) {
+            _wipe_count = n;
+            _wipe_splits.resize(n == 4 ? 2 : (size_t)(n - 1));
+            for (size_t i = 0; i < _wipe_splits.size(); ++i)
+                _wipe_splits[i] = n == 4 ? 0.5f : (float)(i + 1) / n;
+        }
+        std::vector<ViewportPanel::WipeSource> sources;
+        for (auto& m : _models) {
+            std::string name = m->title ? std::string(m->title->get()) :
+                display_name(m->src.file().empty() ? m->path : m->src.file());
+            sources.push_back({&m->panel, std::move(name)});
+        }
+        a.panel.set_wipe(std::move(sources), &_wipe_splits);
         draw_pane(0, avail);
-        b.panel.sync_view_from(a.panel);
         float w = 0.0f, h = 0.0f;
         a.panel.last_avail(w, h);
-        if (w > 0.0f && h > 0.0f) b.panel.render_only(ImVec2(w, h));
+        for (int i = 1; i < n; ++i) {
+            auto& panel = _models[(size_t)i]->panel;
+            panel.sync_view_from(a.panel);
+            if (w > 0.0f && h > 0.0f) panel.render_only(ImVec2(w, h));
+        }
     } else if (n <= 3) {
         const float w = (avail.x - st.ItemSpacing.x * (n - 1)) / n;
         for (int i = 0; i < n; i++) {

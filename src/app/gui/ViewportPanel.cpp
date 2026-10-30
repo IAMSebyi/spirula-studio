@@ -898,7 +898,7 @@ void ViewportPanel::attach_scene(const ViewerRenderConfig& cfg,
 }
 
 void ViewportPanel::detach() {
-    set_wipe(nullptr, nullptr);
+    set_wipe();
     _preview_tex = 0;
     _scene_options = false;
     _apply_color_space = nullptr;
@@ -959,7 +959,7 @@ void ViewportPanel::handle_input(float /*item_h*/) {
 
     // A tool owns the left button for its whole lifetime, so that "does this
     // drag orbit or lasso?" is answered once rather than per feature.
-    bool tool_owns_left = _wipe_src && _wipe_split && wipe_input(rmin, rsz);
+    bool tool_owns_left = _wipe_splits && wipe_input(rmin, rsz);
     if (_interactor && !tool_owns_left) {
         ViewportInput in;
         in.hovered = hovered;
@@ -1795,7 +1795,7 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
     ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2((float)W, (float)H),
                  ImVec2(0, 1), ImVec2(1, 0));
     handle_input((float)H);
-    if (_wipe_src && _wipe_split)
+    if (_wipe_splits)
         draw_wipe(ImGui::GetItemRectMin(), ImGui::GetItemRectSize());
 
     // A tool's pick is the same search, handed over instead of recentred on.
@@ -2045,55 +2045,111 @@ void ViewportPanel::render_only(const ImVec2& avail) {
     }
 }
 
-void ViewportPanel::set_wipe(const ViewportPanel* other, float* split,
-                             std::string left, std::string right) {
-    if (!other || other != _wipe_src) _wipe_drag = false;
-    _wipe_src = other;
-    _wipe_split = split;
-    _wipe_left = std::move(left);
-    _wipe_right = std::move(right);
+void ViewportPanel::set_wipe(std::vector<WipeSource> sources, std::vector<float>* splits) {
+    if (!splits || sources.size() < 2 ||
+        splits->size() != (sources.size() == 4 ? 2 : sources.size() - 1)) {
+        sources.clear();
+        splits = nullptr;
+    }
+    bool changed = splits != _wipe_splits || sources.size() != _wipe_sources.size();
+    if (!changed)
+        for (size_t i = 0; i < sources.size(); ++i)
+            changed |= sources[i].panel != _wipe_sources[i].panel;
+    if (changed || !splits) _wipe_drag = -1;
+    _wipe_sources = std::move(sources);
+    _wipe_splits = splits;
 }
 
 void ViewportPanel::draw_wipe(const ImVec2& tl, const ImVec2& size) const {
-    const bool preview = _wipe_src->_mode == Mode::Preview;
-    const unsigned tex = preview ? _wipe_src->_preview_tex : _wipe_src->_tex;
-    if (!tex) return;
-    const float s = std::clamp(*_wipe_split, 0.0f, 1.0f);
-    const float x = tl.x + s * size.x;
     const ImVec2 br(tl.x + size.x, tl.y + size.y);
+    const bool grid = _wipe_sources.size() == 4;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(tl, br, true);
-    dl->AddImage((ImTextureID)(intptr_t)tex, ImVec2(x, tl.y), br,
-                 ImVec2(s, preview ? 1.0f : 0.0f), ImVec2(1.0f, preview ? 0.0f : 1.0f));
-    const ImU32 line = IM_COL32(255, 255, 255, 220);
-    dl->AddLine(ImVec2(x, tl.y), ImVec2(x, br.y), line, px(2.0f));
-    dl->AddCircleFilled(ImVec2(x, tl.y + size.y * 0.5f), px(8.0f), line, 24);
-    auto tag = [&](const std::string& t, bool right) {
-        if (t.empty()) return;
+    for (size_t i = 0; i < _wipe_sources.size(); ++i) {
+        const float lo = grid ? (i & 1 ? (*_wipe_splits)[0] : 0.0f) :
+                               (i == 0 ? 0.0f : (*_wipe_splits)[i - 1]);
+        const float hi = grid ? (i & 1 ? 1.0f : (*_wipe_splits)[0]) :
+                               (i == _wipe_splits->size() ? 1.0f : (*_wipe_splits)[i]);
+        const float v0 = grid && (i & 2) ? (*_wipe_splits)[1] : 0.0f;
+        const float v1 = grid && !(i & 2) ? (*_wipe_splits)[1] : 1.0f;
+        const float left = tl.x + lo * size.x, right = tl.x + hi * size.x;
+        const float top = tl.y + v0 * size.y, bottom = tl.y + v1 * size.y;
+        const auto& source = _wipe_sources[i];
+        if (i > 0) {
+            const bool preview = source.panel->_mode == Mode::Preview;
+            const unsigned tex = preview ? source.panel->_preview_tex : source.panel->_tex;
+            if (tex)
+                dl->AddImage((ImTextureID)(intptr_t)tex, ImVec2(left, top), ImVec2(right, bottom),
+                             ImVec2(lo, preview ? 1.0f - v0 : v0),
+                             ImVec2(hi, preview ? 1.0f - v1 : v1));
+        }
         const float m = px(8.0f), p = px(4.0f);
-        const std::string label = elide_middle(t, std::max(1.0f, size.x * 0.5f - 2.0f * (m + p)));
+        const float label_width = right - left - 2.0f * (m + p);
+        if (source.name.empty() || label_width < px(16.0f) || bottom - top < px(32.0f)) continue;
+        const std::string label = elide_middle(source.name, label_width);
         const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-        const ImVec2 at(right ? br.x - m - ts.x - p : tl.x + m + p, br.y - m - ts.y - p);
+        const bool align_right = grid ? (i & 1) != 0 : i + 1 == _wipe_sources.size();
+        const ImVec2 at(align_right ? right - m - ts.x - p : left + m + p,
+                        bottom - m - ts.y - p);
         dl->AddRectFilled(ImVec2(at.x - p, at.y - p), ImVec2(at.x + ts.x + p, at.y + ts.y + p),
                           IM_COL32(0, 0, 0, 160), p);
         dl->AddText(at, IM_COL32(255, 255, 255, 255), label.c_str());
-    };
-    tag(_wipe_left, false);
-    tag(_wipe_right, true);
+    }
+    const ImU32 line = IM_COL32(255, 255, 255, 220);
+    if (grid) {
+        const ImVec2 cross(tl.x + (*_wipe_splits)[0] * size.x, tl.y + (*_wipe_splits)[1] * size.y);
+        dl->AddLine(ImVec2(cross.x, tl.y), ImVec2(cross.x, br.y), line, px(2.0f));
+        dl->AddLine(ImVec2(tl.x, cross.y), ImVec2(br.x, cross.y), line, px(2.0f));
+        dl->AddCircleFilled(cross, px(8.0f), line, 24);
+    } else {
+        for (float split : *_wipe_splits) {
+            const float x = tl.x + split * size.x;
+            dl->AddLine(ImVec2(x, tl.y), ImVec2(x, br.y), line, px(2.0f));
+            dl->AddCircleFilled(ImVec2(x, tl.y + size.y * 0.5f), px(8.0f), line, 24);
+        }
+    }
     dl->PopClipRect();
 }
 
 bool ViewportPanel::wipe_input(const ImVec2& tl, const ImVec2& size) {
     const ImGuiIO& io = ImGui::GetIO();
-    const float x = tl.x + std::clamp(*_wipe_split, 0.0f, 1.0f) * size.x;
-    const bool over = !_dragging && !_giz_down && !_interactor && ImGui::IsItemHovered() &&
-                      std::fabs(io.MousePos.x - x) <= px(8.0f);
-    if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) _wipe_drag = true;
-    if (_wipe_drag && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) _wipe_drag = false;
-    if (_wipe_drag)
-        *_wipe_split = std::clamp((io.MousePos.x - tl.x) / size.x, 0.0f, 1.0f);
-    if (over || _wipe_drag) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    return _wipe_drag;
+    const bool grid = _wipe_sources.size() == 4;
+    int hot = -1;
+    if (!_dragging && !_giz_down && !_interactor && ImGui::IsItemHovered()) {
+        if (grid) {
+            const bool vertical = std::fabs(io.MousePos.x - tl.x - (*_wipe_splits)[0] * size.x) <= px(8.0f);
+            const bool horizontal = std::fabs(io.MousePos.y - tl.y - (*_wipe_splits)[1] * size.y) <= px(8.0f);
+            hot = vertical && horizontal ? 2 : vertical ? 0 : horizontal ? 1 : -1;
+        } else {
+            float nearest = px(8.0f);
+            for (size_t i = 0; i < _wipe_splits->size(); ++i) {
+                const float distance = std::fabs(io.MousePos.x - tl.x - (*_wipe_splits)[i] * size.x);
+                if (distance <= nearest) {
+                    nearest = distance;
+                    hot = (int)i;
+                }
+            }
+        }
+    }
+    if (hot >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) _wipe_drag = hot;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) _wipe_drag = -1;
+    if (_wipe_drag >= 0) {
+        const size_t i = (size_t)_wipe_drag;
+        if (grid) {
+            if (i != 1) (*_wipe_splits)[0] = std::clamp((io.MousePos.x - tl.x) / size.x, 0.0f, 1.0f);
+            if (i != 0) (*_wipe_splits)[1] = std::clamp((io.MousePos.y - tl.y) / size.y, 0.0f, 1.0f);
+        } else {
+            const float lo = i == 0 ? 0.0f : (*_wipe_splits)[i - 1];
+            const float hi = i + 1 == _wipe_splits->size() ? 1.0f : (*_wipe_splits)[i + 1];
+            (*_wipe_splits)[i] = std::clamp((io.MousePos.x - tl.x) / size.x, lo, hi);
+        }
+    }
+    const int active = _wipe_drag >= 0 ? _wipe_drag : hot;
+    if (active >= 0)
+        ImGui::SetMouseCursor(grid ? (active == 2 ? ImGuiMouseCursor_ResizeAll :
+                                     active == 1 ? ImGuiMouseCursor_ResizeNS : ImGuiMouseCursor_ResizeEW) :
+                                    ImGuiMouseCursor_ResizeEW);
+    return _wipe_drag >= 0;
 }
 
 void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
@@ -2112,7 +2168,7 @@ void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
         const ImVec2 tl = ImGui::GetItemRectMin();
         draw_grid_overlay(tl.x + 8, tl.y + 6, 0);
         handle_input(size.y);
-        if (_wipe_src && _wipe_split) draw_wipe(tl, size);
+        if (_wipe_splits) draw_wipe(tl, size);
         draw_overlays();
     } else {
         ImGui::Dummy(ImVec2(avail.x, avail.y * 0.4f));
