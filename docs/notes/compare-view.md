@@ -10,6 +10,18 @@ better?", which is the question anyone tuning a reconstruction is actually
 asking, and it is only answerable if the two pictures differ in nothing but the
 model.
 
+The **Wipe** checkbox overlays the first two models in one pane with a
+draggable vertical divider and a name in each bottom corner. It forces linked
+navigation and supports splats, meshes and point clouds, including mixed pairs.
+Further models stay hidden until Wipe is turned off. Editing or rendering a
+model temporarily suspends the wipe.
+
+The second viewport renders without controls at the first viewport's size,
+then its texture is cropped at the divider. Engine renders are asynchronous,
+so the two sides can briefly show different frames during navigation; they
+converge when the camera stops. Preview textures use the opposite vertical UV
+direction to engine textures.
+
 Three pieces make that work.
 
 ## Several splat models resident at once

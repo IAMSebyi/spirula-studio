@@ -4542,6 +4542,49 @@ SS_MSG(compare_link_views_help,
     TR("Tüm bölmeler için tek bir kamera; böylece sahnenin aynı yeri hepsinde "
        "aynı anda görünür."));
 
+SS_MSG(compare_wipe,
+    EN("Wipe"),
+    JA("ワイプ"),
+    ZH_HANS("划像对比"),
+    ZH_HANT("劃像對比"),
+    KO("와이프"),
+    DE("Wischen"),
+    FR("Volet"),
+    ES("Cortinilla"),
+    PT("Cortina"),
+    IT("Tendina"),
+    NL("Veegbalk"),
+    RU("Шторка"),
+    TR("Perde"));
+
+SS_MSG(compare_wipe_help,
+    EN("The first two models in one pane on one camera, the second shown right "
+       "of a divider. Drag the divider to move it."),
+    JA("最初の2つのモデルを同じカメラで1つのペインに重ね、2つ目を境界線の右側に"
+       "表示します。境界線はドラッグで動かせます。"),
+    ZH_HANS("前两个模型用同一台相机叠在一个窗格里，第二个显示在分界线右侧。"
+            "拖动分界线即可移动。"),
+    ZH_HANT("前兩個模型用同一台相機疊在一個窗格裡，第二個顯示在分界線右側。"
+            "拖動分界線即可移動。"),
+    KO("처음 두 모델을 같은 카메라로 한 창에 겹쳐, 두 번째 모델을 경계선 오른쪽에 "
+       "보여 줍니다. 경계선은 끌어서 옮깁니다."),
+    DE("Die ersten beiden Modelle in einem Bereich mit einer Kamera, das zweite "
+       "rechts einer Trennlinie. Die Linie lässt sich ziehen."),
+    FR("Les deux premiers modèles dans un volet, sur une caméra, le second à "
+       "droite d'une ligne. Faites glisser la ligne pour la déplacer."),
+    ES("Los dos primeros modelos en un panel con una cámara, el segundo a la "
+       "derecha de una línea. Arrastra la línea para moverla."),
+    PT("Os dois primeiros modelos num painel com uma câmera, o segundo à direita "
+       "de uma linha. Arraste a linha para movê-la."),
+    IT("I primi due modelli in un riquadro con una telecamera, il secondo a "
+       "destra di una linea. Trascina la linea per spostarla."),
+    NL("De eerste twee modellen in één venster met één camera, het tweede rechts "
+       "van een scheidslijn. Sleep de lijn om hem te verplaatsen."),
+    RU("Первые две модели в одной панели с одной камерой, вторая справа от "
+       "линии. Линию можно перетаскивать."),
+    TR("İlk iki model tek bölmede, tek kamerayla; ikincisi bir çizginin sağında. "
+       "Çizgiyi sürükleyerek taşıyın."));
+
 SS_MSG(compare_placement_help,
     EN("Where this model sits, and where its pane is."),
     JA("このモデルの置き場所と、ペインの並び順です。"),

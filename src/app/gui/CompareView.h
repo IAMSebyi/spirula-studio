@@ -176,6 +176,8 @@ private:
     std::vector<std::unique_ptr<Model>> _models;
     bool _engine_taken = false;
     bool _link = true;
+    bool _wipe = false;
+    float _wipe_split = 0.5f;
     // Whose frame the axes/grid overlay was built for; "" when there is none.
     std::string _overlay_key;
     uint32_t _slots_used = 0;

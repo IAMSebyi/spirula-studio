@@ -898,6 +898,8 @@ void ViewportPanel::attach_scene(const ViewerRenderConfig& cfg,
 }
 
 void ViewportPanel::detach() {
+    set_wipe(nullptr, nullptr);
+    _preview_tex = 0;
     _scene_options = false;
     _apply_color_space = nullptr;
     _on_primitive_changed = nullptr;
@@ -957,8 +959,8 @@ void ViewportPanel::handle_input(float /*item_h*/) {
 
     // A tool owns the left button for its whole lifetime, so that "does this
     // drag orbit or lasso?" is answered once rather than per feature.
-    bool tool_owns_left = false;
-    if (_interactor) {
+    bool tool_owns_left = _wipe_src && _wipe_split && wipe_input(rmin, rsz);
+    if (_interactor && !tool_owns_left) {
         ViewportInput in;
         in.hovered = hovered;
         in.x = io.MousePos.x - rmin.x;
@@ -1739,6 +1741,8 @@ void ViewportPanel::draw(bool training, int step) {
     if (_image_w > 0.0f) avail.x = std::min(avail.x, _image_w);
     avail.x = std::max(avail.x, 64.0f);
     avail.y = std::max(avail.y, 64.0f);
+    _last_avail_w = avail.x;
+    _last_avail_h = avail.y;
 
     if (_mode == Mode::None) {
         ImGui::Dummy(ImVec2(avail.x, avail.y * 0.4f));
@@ -1754,9 +1758,9 @@ void ViewportPanel::draw(bool training, int step) {
     else                        draw_engine(training, avail, step);
 }
 
-void ViewportPanel::draw_preview(const ImVec2& avail) {
-    int W = (int)std::clamp(avail.x, 64.0f, 4096.0f);
-    int H = (int)std::clamp(avail.y, 64.0f, 4096.0f);
+unsigned ViewportPanel::pump_preview(const ImVec2& avail, int& W, int& H) {
+    W = (int)std::clamp(avail.x, 64.0f, 4096.0f);
+    H = (int)std::clamp(avail.y, 64.0f, 4096.0f);
     float view[16];
     view_matrix(view);
     // Same intrinsics as the engine render request -> seamless transition.
@@ -1768,13 +1772,21 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
     _preview.dim_points_outside(_roi_points_inside, _show_roi);
     PreviewStyle style;
     style.point_px = _point_px;
-    unsigned tex = _preview.render(W, H, view,
+    _preview_tex = _preview.render(W, H, view,
                                    (PreviewProjection)_cam_model,
                                    fx / (0.5f * W), fy / (0.5f * H),
                                    _home_dist, nav_dist() / _m2s_scale, target,
                                    _show_cams, _frustum_scale,
                                    _show_grid && !external_grid(),
                                    ortho_pullback(false), &style);
+    return _preview_tex;
+}
+
+void ViewportPanel::draw_preview(const ImVec2& avail) {
+    int W, H;
+    const unsigned tex = pump_preview(avail, W, H);
+    float fx, fy;
+    compute_intrinsics(W, H, fx, fy);
     if (!tex) {
         ui::TextDisabled(msg::viewport_render_failed);
         return;
@@ -1783,6 +1795,8 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
     ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2((float)W, (float)H),
                  ImVec2(0, 1), ImVec2(1, 0));
     handle_input((float)H);
+    if (_wipe_src && _wipe_split)
+        draw_wipe(ImGui::GetItemRectMin(), ImGui::GetItemRectSize());
 
     // A tool's pick is the same search, handed over instead of recentred on.
     if (_tool_pick) {
@@ -1828,10 +1842,6 @@ void ViewportPanel::draw_preview(const ImVec2& avail) {
 
     draw_overlays();
 
-    // A count and what is being counted, which depends on what is being
-    // previewed. Labelled rather than inflected ("Triangles: 12", not
-    // "12 triangles") so no language needs a plural rule for it, and kept
-    // short because it sits on top of the image.
     const std::string info =
         _preview.has_mesh()
             ? spirula::i18n::format(spirula::i18n::msg::gui::overlay_triangles,
@@ -1960,26 +1970,20 @@ int ViewportPanel::idle_step_interval() const {
                            15.0, 600.0);
 }
 
-void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
+void ViewportPanel::pump_engine(bool training, const ImVec2& avail, int step) {
     const double now = ImGui::GetTime();
     if (_shot_inflight) poll_capture();
 
-    // Poll the in-flight render.
     if (_pending && !_shot_inflight) {
         ViewResult res;
         if (_worker.try_get_result(_pending, res)) {
             _pending = 0;
-            // What that render cost, for idle_step_interval(); timed on the
-            // worker (ViewResult::secs), so the frames this panel spent not
-            // being drawn -- the other preview mode, another screen -- are not
-            // charged to it.
+            // Worker timing excludes frames when this panel was hidden.
             if (res.secs > 0) _render_secs = _render_secs > 0
                 ? 0.8 * _render_secs + 0.2 * res.secs : res.secs;
             if (res.error.empty()) {
                 upload(res);
                 _last_error.clear();
-                // Double-click centering result (background clicks miss), or
-                // a tool's pick, which is delivered whatever it found.
                 if (_tool_pick_inflight) {
                     _tool_pick_inflight = false;
                     _tool_pick_done = true;
@@ -1996,19 +2000,8 @@ void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
         }
     }
 
-    // Submit a fresh render when needed.
-    //
-    // Three cases: something changed (_dirty), the user is steering (refresh
-    // as fast as the worker will take it, since a stale frame is what makes
-    // navigation feel broken), or the picture is simply keeping up with
-    // training -- and that last one is paced in ITERATIONS, so a run whose
-    // steps take 10 ms and one whose steps take a second both give the
-    // viewport about the same slice of themselves.
     int W = 0, H = 0;
     render_size(avail, W, H);
-    // The viewport changed size -- the window was resized, or a pane was added
-    // or removed beside this one. Without this the last render is aspect-fit
-    // into the new box, black bars and all, until something else dirties it.
     if (W != _tex_w || H != _tex_h) _dirty = true;
     bool live = false;
     if (training && _auto_refresh) {
@@ -2025,8 +2018,7 @@ void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
     if (!_pending && want) {
         ViewRequest q;
         build_request(q, W, H);
-        // Attach a pending double-click pick to this render; the picked
-        // point comes back with the result (depth readback, no extra pass).
+        // Pick depth travels with the render result, without an extra pass.
         if (_tool_pick) {
             q.pick_px = std::clamp((int)(_tool_pick_uv[0] * (float)W), 0, W - 1);
             q.pick_py = std::clamp((int)(_tool_pick_uv[1] * (float)H), 0, H - 1);
@@ -2042,8 +2034,71 @@ void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
         _last_render_step = step;
         _dirty = false;
     }
+}
 
-    // Draw the last result, aspect-fit.
+void ViewportPanel::render_only(const ImVec2& avail) {
+    note_motion(ImGui::GetTime());
+    if (_mode == Mode::Engine) pump_engine(false, avail, -1);
+    else if (_mode == Mode::Preview) {
+        int W, H;
+        pump_preview(avail, W, H);
+    }
+}
+
+void ViewportPanel::set_wipe(const ViewportPanel* other, float* split,
+                             std::string left, std::string right) {
+    if (!other || other != _wipe_src) _wipe_drag = false;
+    _wipe_src = other;
+    _wipe_split = split;
+    _wipe_left = std::move(left);
+    _wipe_right = std::move(right);
+}
+
+void ViewportPanel::draw_wipe(const ImVec2& tl, const ImVec2& size) const {
+    const bool preview = _wipe_src->_mode == Mode::Preview;
+    const unsigned tex = preview ? _wipe_src->_preview_tex : _wipe_src->_tex;
+    if (!tex) return;
+    const float s = std::clamp(*_wipe_split, 0.0f, 1.0f);
+    const float x = tl.x + s * size.x;
+    const ImVec2 br(tl.x + size.x, tl.y + size.y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(tl, br, true);
+    dl->AddImage((ImTextureID)(intptr_t)tex, ImVec2(x, tl.y), br,
+                 ImVec2(s, preview ? 1.0f : 0.0f), ImVec2(1.0f, preview ? 0.0f : 1.0f));
+    const ImU32 line = IM_COL32(255, 255, 255, 220);
+    dl->AddLine(ImVec2(x, tl.y), ImVec2(x, br.y), line, px(2.0f));
+    dl->AddCircleFilled(ImVec2(x, tl.y + size.y * 0.5f), px(8.0f), line, 24);
+    auto tag = [&](const std::string& t, bool right) {
+        if (t.empty()) return;
+        const float m = px(8.0f), p = px(4.0f);
+        const std::string label = elide_middle(t, std::max(1.0f, size.x * 0.5f - 2.0f * (m + p)));
+        const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+        const ImVec2 at(right ? br.x - m - ts.x - p : tl.x + m + p, br.y - m - ts.y - p);
+        dl->AddRectFilled(ImVec2(at.x - p, at.y - p), ImVec2(at.x + ts.x + p, at.y + ts.y + p),
+                          IM_COL32(0, 0, 0, 160), p);
+        dl->AddText(at, IM_COL32(255, 255, 255, 255), label.c_str());
+    };
+    tag(_wipe_left, false);
+    tag(_wipe_right, true);
+    dl->PopClipRect();
+}
+
+bool ViewportPanel::wipe_input(const ImVec2& tl, const ImVec2& size) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const float x = tl.x + std::clamp(*_wipe_split, 0.0f, 1.0f) * size.x;
+    const bool over = !_dragging && !_giz_down && !_interactor && ImGui::IsItemHovered() &&
+                      std::fabs(io.MousePos.x - x) <= px(8.0f);
+    if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) _wipe_drag = true;
+    if (_wipe_drag && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) _wipe_drag = false;
+    if (_wipe_drag)
+        *_wipe_split = std::clamp((io.MousePos.x - tl.x) / size.x, 0.0f, 1.0f);
+    if (over || _wipe_drag) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    return _wipe_drag;
+}
+
+void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
+    pump_engine(training, avail, step);
+
     if (_tex && _tex_w > 0) {
         float ar_img = (float)_tex_w / (float)_tex_h;
         float ar_avail = avail.x / avail.y;
@@ -2057,6 +2112,7 @@ void ViewportPanel::draw_engine(bool training, const ImVec2& avail, int step) {
         const ImVec2 tl = ImGui::GetItemRectMin();
         draw_grid_overlay(tl.x + 8, tl.y + 6, 0);
         handle_input(size.y);
+        if (_wipe_src && _wipe_split) draw_wipe(tl, size);
         draw_overlays();
     } else {
         ImGui::Dummy(ImVec2(avail.x, avail.y * 0.4f));
