@@ -6910,6 +6910,12 @@ SS_MSG(subj_sky,
     PT("Céu"),          IT("Cielo"),      NL("Lucht"),       RU("Небо"),
     TR("Gökyüzü"));
 
+SS_MSG(subj_cloud,
+    EN("Cloud"), JA("雲"), ZH_HANS("云"), ZH_HANT("雲"),
+    KO("구름"), DE("Wolke"), FR("Nuage"), ES("Nube"),
+    PT("Nuvem"), IT("Nuvola"), NL("Wolk"), RU("Облако"),
+    TR("Bulut"));
+
 SS_MSG(subj_shadow,
     EN("Shadow of a person"),
     JA("人の影"),
@@ -6930,6 +6936,12 @@ SS_MSG(subj_water,
     KO("물"),            DE("Wasser"),     FR("Eau"),         ES("Agua"),
     PT("Água"),         IT("Acqua"),      NL("Water"),       RU("Вода"),
     TR("Su"));
+
+SS_MSG(subj_wave,
+    EN("Wave"), JA("波"), ZH_HANS("波浪"), ZH_HANT("波浪"),
+    KO("파도"), DE("Welle"), FR("Vague"), ES("Ola"),
+    PT("Onda"), IT("Onda"), NL("Golf"), RU("Волна"),
+    TR("Dalga"));
 
 SS_MSG(subj_reflection,
     EN("Reflection"),   JA("映り込み"),    ZH_HANS("倒影"),     ZH_HANT("倒影"),
