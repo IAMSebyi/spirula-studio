@@ -300,10 +300,8 @@ float3 background_apply_exponent(float3 display, float p) {
                   pow(max(display.z, 0.0f), p));
 }
 
-// Unproject an undistorted, normalized image point to a ray direction.
-// Handles all camera models (PINHOLE / FISHEYE / EQUISOLID / EQUIRECTANGULAR).
-// is_ray_depth: ray is unit length (depth measured along the ray);
-// otherwise the ray has z == 1 (depth measured along the optical axis).
+// Unproject an undistorted image point to ray direction. is_ray_depth gives
+// a unit ray; otherwise the ray has z == 1 (measured along optical axis).
 [Differentiable]
 float3 unproject_raydir(
     float2 uv,
