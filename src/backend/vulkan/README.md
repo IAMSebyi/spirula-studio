@@ -673,7 +673,7 @@ the engine level.
   (densify_clip_scale, MCMC/revised noise, long-axis-split relocate/add,
   MCMC relocate/add) over `backend/vulkan/shaders/densify.slang`, which includes the
   canonical `shaders/densify.slang` device code (long_axis_split_3dgs, the
-  randn3 noise kernels) and mirrors the McmcRelocation.cu-only mcmc_relocation
+  Gaussian noise kernels) and mirrors the McmcRelocation.cu-only mcmc_relocation
   math; `kernels/Optimizer.cpp` gains the adamtr trust-region color
   variants (`backend/vulkan/shaders/optim_color.slang`) and the fused 3DGS geometry
   step (`backend/vulkan/shaders/optim_geometry.slang`, sharing the FPBO helpers
@@ -718,6 +718,17 @@ the engine level.
     loose floats + 2.8M codes; 10 configs over sh_optim_bits 32/8/4 x
     sh_value_bits 32/16/8 x bounds layouts x non-SH quant x degree
     warmup). All three devices pass; validation clean.
+- **Projective depth**: `kernels/ProjectiveDepth.cpp` and
+  `backend/vulkan/shaders/projective_depth.slang` observe existing raster
+  gradients to update each splat's anchor and geometric information. FPBO and
+  the separate geometry optimizer share `shaders/projective_depth.slang` with
+  CUDA. Densification inherits the added state; full checkpoints preserve it.
+  `projective_depth_test`, `fpbo_parity`, `fpbo_split_parity`,
+  `densify_parity`, `projective_resume`, and `projective_camera_batches` cover
+  both backends, including coincident faces and accumulated passes. Exploration
+  keys hash `(step, splat index, component)` as integers; `noise_moments`
+  checks the shared Box–Muller transform and cross-step independence.
+  See [projective depth optimization](../../../docs/notes/projective-depth.md).
 - **Bilagrid/PPISP color pipeline (phase 5, sixth slice)**:
   `kernels/Bilagrid.cpp` implements the full kernels/bilagrid/BilagridBindings.h raw
   launcher family (affine / PPISP / log-linear / depth / normal samplers:

@@ -1488,6 +1488,27 @@ SS_MSG(metashape_psx_help,
     TR("Metashape proje dosyası; projede birden çok görüntü aynı dosya adını "
        "taşıdığında hangisinin kastedildiğini çözmek için kullanılır."));
 
+SS_MSG(sampling_seed,
+    EN("Camera sampling seed"), JA("カメラ選択の乱数シード"), ZH_HANS("相机采样随机种子"),
+    ZH_HANT("相機取樣隨機種子"), KO("카메라 샘플링 시드"), DE("Startwert der Kameraauswahl"),
+    FR("Graine de sélection des caméras"), ES("Semilla de muestreo de cámaras"),
+    PT("Semente de amostragem de câmeras"), IT("Seme di campionamento delle fotocamere"),
+    NL("Startwaarde voor cameraselectie"), RU("Зерно выборки камер"), TR("Kamera örnekleme tohumu"));
+SS_MSG(sampling_seed_help,
+    EN("Random seed for camera sampling. 0 chooses a new seed for each run."),
+    JA("カメラ選択に使う乱数シードです。0 は実行ごとに新しい値を選びます。"),
+    ZH_HANS("相机采样的随机种子。0 表示每次运行选择新种子。"),
+    ZH_HANT("相機取樣的隨機種子。0 表示每次執行選擇新種子。"),
+    KO("카메라 샘플링의 난수 시드입니다. 0은 실행마다 새 시드를 선택합니다."),
+    DE("Zufallsstartwert für die Kameraauswahl. 0 wählt für jeden Lauf einen neuen Wert."),
+    FR("Graine aléatoire de sélection des caméras. 0 choisit une nouvelle graine à chaque exécution."),
+    ES("Semilla aleatoria para el muestreo de cámaras. 0 elige una nueva en cada ejecución."),
+    PT("Semente aleatória para amostragem de câmeras. 0 escolhe uma nova a cada execução."),
+    IT("Seme casuale per il campionamento delle fotocamere. 0 sceglie un nuovo seme a ogni esecuzione."),
+    NL("Willekeurige startwaarde voor cameraselectie. 0 kiest bij elke uitvoering een nieuwe waarde."),
+    RU("Зерно случайной выборки камер. При 0 для каждого запуска выбирается новое зерно."),
+    TR("Kamera örneklemesi için rastgele tohum. 0, her çalıştırmada yeni bir tohum seçer."));
+
 SS_MSG(train_resolution_divisor,
     EN("Training resolution divisor"), JA("学習解像度の分母"),
     ZH_HANS("训练分辨率缩小倍数"), ZH_HANT("訓練解析度縮小倍數"),
@@ -12751,6 +12772,49 @@ SS_MSG(use_bvh_help,
 // ===========================================================================
 // Learning Rates
 // ===========================================================================
+
+SS_MSG(projective_depth_lr,
+    EN("Depth learning rate"), JA("奥行きの学習率"), ZH_HANS("深度学习率"),
+    ZH_HANT("深度學習率"), KO("깊이 학습률"), DE("Tiefenlernrate"),
+    FR("Taux d'apprentissage de profondeur"), ES("Tasa de aprendizaje de profundidad"),
+    PT("Taxa de aprendizado de profundidade"), IT("Tasso di apprendimento della profondità"),
+    NL("Leersnelheid voor diepte"), RU("Скорость обучения глубины"), TR("Derinlik öğrenme oranı"));
+SS_MSG(projective_depth_lr_help,
+    EN("How quickly uncertain geometry adjusts its depth. Set to 0 to disable."),
+    JA("不確かな形状の奥行きを調整する速さです。0 で無効になります。"),
+    ZH_HANS("不确定几何体调整深度的速度。设为 0 可禁用。"),
+    ZH_HANT("不確定幾何體調整深度的速度。設為 0 可停用。"),
+    KO("불확실한 형상의 깊이를 조정하는 속도입니다. 0으로 설정하면 비활성화됩니다."),
+    DE("Wie schnell unsichere Geometrie ihre Tiefe anpasst. 0 deaktiviert die Anpassung."),
+    FR("Vitesse d'ajustement de la profondeur des géométries incertaines. 0 désactive l'ajustement."),
+    ES("Rapidez con la que la geometría incierta ajusta su profundidad. 0 desactiva el ajuste."),
+    PT("Rapidez com que a geometria incerta ajusta sua profundidade. 0 desativa o ajuste."),
+    IT("Velocità di regolazione della profondità della geometria incerta. 0 disattiva la regolazione."),
+    NL("Hoe snel onzekere geometrie de diepte aanpast. Zet op 0 om dit uit te schakelen."),
+    RU("Скорость уточнения глубины неопределённой геометрии. 0 отключает уточнение."),
+    TR("Belirsiz geometrinin derinliğini ayarlama hızı. Devre dışı bırakmak için 0 yapın."));
+
+SS_MSG(projective_depth_lr_final,
+    EN("Final depth learning rate"), JA("最後の奥行きの学習率"), ZH_HANS("最终深度学习率"),
+    ZH_HANT("最終深度學習率"), KO("최종 깊이 학습률"), DE("Abschließende Tiefenlernrate"),
+    FR("Taux final d'apprentissage de profondeur"), ES("Tasa final de aprendizaje de profundidad"),
+    PT("Taxa final de aprendizado de profundidade"), IT("Tasso finale di apprendimento della profondità"),
+    NL("Uiteindelijke leersnelheid voor diepte"), RU("Итоговая скорость обучения глубины"),
+    TR("Son derinlik öğrenme oranı"));
+SS_MSG(projective_depth_lr_final_help,
+    EN("Depth learning rate at the end of training. Set to none to keep it constant."),
+    JA("学習終了時の奥行きの学習率です。none で一定に保ちます。"),
+    ZH_HANS("训练结束时的深度学习率。设为 none 可保持不变。"),
+    ZH_HANT("訓練結束時的深度學習率。設為 none 可保持不變。"),
+    KO("학습 종료 시의 깊이 학습률입니다. none으로 설정하면 일정하게 유지됩니다."),
+    DE("Tiefenlernrate am Ende des Trainings. none hält sie konstant."),
+    FR("Taux d'apprentissage de profondeur en fin d'entraînement. none le garde constant."),
+    ES("Tasa de aprendizaje de profundidad al final del entrenamiento. none la mantiene constante."),
+    PT("Taxa de aprendizado de profundidade no fim do treinamento. none mantém a taxa constante."),
+    IT("Tasso di apprendimento della profondità a fine addestramento. none lo mantiene costante."),
+    NL("Leersnelheid voor diepte aan het einde van de training. none houdt deze constant."),
+    RU("Скорость обучения глубины в конце обучения. none сохраняет её постоянной."),
+    TR("Eğitim sonundaki derinlik öğrenme oranı. Sabit tutmak için none yapın."));
 
 SS_MSG(means_lr,
     EN("Movement rate"), JA("移動の学習率"), ZH_HANS("移动学习率"),

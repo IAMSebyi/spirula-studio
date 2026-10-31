@@ -165,6 +165,7 @@ inline bool train_choices_free_form(const char* choices) {
     X(float, roi_outside_opacity_decay, 1.0f, "dataset", "advanced", "")     \
     X(int, roi_splat_samples, 4, "dataset", "advanced", "")                  \
     X(bool, roi_mask_pixels, true, "dataset", "advanced", "")                \
+    X(int, sampling_seed, 0, "dataset", "expert", "")                         \
     X(float, train_resolution_divisor, 0.0f, "dataset", "basic", "")         \
     X(std::string, downscale_rounding_mode, "floor", "dataset", "advanced", "floor|ceil|round") \
     X(bool, progressive_resolution, false, "dataset", "basic", "")           \
@@ -383,6 +384,8 @@ inline bool train_choices_free_form(const char* choices) {
     X(bool, use_bvh, false, "perf", "stub", "")                              \
                                                                              \
     /* ==== rates -- how fast each splat parameter is allowed to change ==== */ \
+    X(float, projective_depth_lr, 0.01f, "rates", "advanced", "")          \
+    X(std::optional<float>, projective_depth_lr_final, 0.0001f, "rates", "advanced", "") \
     X(float, means_lr, 0.000256f, "rates", "basic", "")                      \
     X(std::optional<float>, means_lr_final, 3.2e-06f, "rates", "basic", "")  \
     X(float, scales_lr, 0.02f, "rates", "basic", "")                         \
@@ -589,6 +592,7 @@ inline bool train_apply_preset(TrainConfig& c, const std::string& name) {
         c.scale_reg = 0.01f;
         c.max_steps = 30000;
         c.use_scale_agnostic_mean = false;
+        c.projective_depth_lr = 0.0f;
         c.use_per_splat_bias_correction = false;
         c.means_lr = 0.00016f;
         c.means_lr_final = 1.6e-06f;

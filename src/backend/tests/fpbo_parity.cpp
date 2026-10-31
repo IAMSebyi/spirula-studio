@@ -378,6 +378,25 @@ int main(int argc, char** argv) {
         visit.counters = d_visit;
         visit.skip_unrendered_reg = cfg.per_splat_steps;
 
+        ProjectiveDepthOptim depth;
+        float* depth_rows = nullptr;
+        float* depth_information = nullptr;
+        float* depth_centers = nullptr;
+        int32_t* depth_cameras = nullptr;
+        if (cfg.cam == 0 && cfg.dist == 0) {
+            std::vector<float> rows(4*N,0);
+            for (int64_t i = 0; i < N; ++i) rows[4*i] = 1;
+            depth_rows = upload(rows);
+            depth_information = upload(std::vector<float>(N,100));
+            depth_centers = upload(std::vector<float>{0,0,-4,1});
+            depth_cameras = upload(std::vector<int32_t>{0});
+            depth.states = (float4*)depth_rows;
+            depth.information = depth_information;
+            depth.centers = (float4*)depth_centers;
+            depth.camera_indices = depth_cameras;
+            depth.lr = .001f; depth.angular_lr = .001f;
+        }
+
         float* d_ds = nullptr;
         DeviceVector<float> densify_score;
         if (cfg.densify) {
@@ -407,7 +426,7 @@ int main(int argc, char** argv) {
                dist_fixture::kTierNames[cfg.dist], dist_tv(cfg.dist),
                cam_ids, gauss_ids, aabb_2d, v_world,
                v_screen, g1_world, g2_world, shq_tv, shq_b_tv, shv_tv,
-               shv_b_tv, non_sh, visit, radii, densify_score,
+               shv_b_tv, non_sh, visit, depth, radii, densify_score,
                /*lr_means=*/1.6e-4f, /*lr_quats=*/1e-3f, /*lr_scales=*/5e-3f,
                /*lr_opacs=*/5e-2f, /*lr_features_dc=*/2.5e-3f,
                /*lr_features_sh=*/1.25e-4f, /*lr_features_sb=*/2.5e-3f,
@@ -426,6 +445,11 @@ int main(int argc, char** argv) {
             if (check_error("fpbo")) return 1;
         }
 
+        if (depth.states) {
+            readback_f(acc_f,depth_rows,4*N);
+            backend::device_free(depth_rows); backend::device_free(depth_information);
+            backend::device_free(depth_centers); backend::device_free(depth_cameras);
+        }
         // --- readback: updated params, Adam state, bounds, scores ---
         readback_f(acc_f, d_means, N * 3);
         readback_f(acc_f, d_quats, N * 4);

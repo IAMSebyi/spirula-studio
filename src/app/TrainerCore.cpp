@@ -596,6 +596,14 @@ EngineStepConfig build_step_config(const TrainConfig& c, const RunState& st, int
     float means_lr = scheduled_lr(step, max_steps_lr, c.means_lr, c.means_lr_final);
     if (!c.use_scale_agnostic_mean) means_lr *= alpha;
     cfg.optim.lr_means       = means_lr;
+    cfg.optim.lr_projective_depth = scheduled_lr(step,max_steps_lr,
+        c.projective_depth_lr,c.projective_depth_lr_final);
+    cfg.optim.projective_photometric = true;
+    for (auto loss : {LossWeightIndex::NormalReg,LossWeightIndex::DepthDistReg,
+                     LossWeightIndex::NormalDistReg,LossWeightIndex::MeanMedianDepthSup,
+                     LossWeightIndex::MedianDepthNormalReg,LossWeightIndex::MedianNormalSup,
+                     LossWeightIndex::MedianRenderNormalReg})
+        if (cfg.loss.weights[(int)loss] != 0) cfg.optim.projective_photometric = false;
     cfg.optim.lr_quats       = scheduled_lr(step, max_steps_lr, c.quats_lr);
     cfg.optim.lr_scales      = scheduled_lr(step, max_steps_lr, c.scales_lr, c.scales_lr_final);
     cfg.optim.lr_opacities   = scheduled_lr(step, max_steps_lr, c.opacities_lr);
@@ -1387,6 +1395,7 @@ void TrainerSession::setup_engine() {
 
     DataManagerConfig dm;
     dm.cache_mode  = (cfg.cache_images == "disk") ? CacheMode::DISK : CacheMode::CPU;
+    dm.seed = (uint64_t)std::max(cfg.sampling_seed,0);
     // A split needs a mask even when none is on disk: the synthesized
     // all-white one becomes the post-split FOV mask (0 past the lens),
     // without which the unseen face regions train as black.
@@ -1588,7 +1597,7 @@ void TrainerSession::restore_checkpoint() {
     }
 
     try {
-        start_step = engine_load_checkpoint(load_from.string());
+        start_step = engine_load_checkpoint(load_from.string(),cfg.projective_depth_lr > 0);
     } catch (const std::exception& e) {
         if (adapted) remove_tree(tmp);
         throw std::runtime_error(
@@ -2055,6 +2064,7 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
     // otherwise pack several resolutions into one step.
     DataManagerConfig dm;
     dm.cache_mode  = (cfg.cache_images == "disk") ? CacheMode::DISK : CacheMode::CPU;
+    dm.seed = (uint64_t)std::max(cfg.sampling_seed,0);
     const std::vector<uint8_t> eval_alpha = probe_alpha_masks(eds.image_filenames);
     const bool eval_masks =
         (!eds.mask_filenames.empty() || !eval_alpha.empty()) && cfg.load_masks;
@@ -2100,10 +2110,13 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
         int64_t index = 0;
         int H = 0, W = 0, C = 0;
         std::vector<float> gt, pred;
+        std::vector<uint8_t> mask;
     };
     struct ViewScore {
         bool  filled = false;
         float l1 = 0, psnr = 0, ssim = 0, cc_l1 = 0, cc_psnr = 0, cc_ssim = 0;
+        std::vector<float> masked;
+        std::vector<float> masked_lpips, masked_cc_lpips;
         std::vector<float> lpips, cc_lpips;   // one per lpips_names entry
     };
 
@@ -2123,14 +2136,11 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
     std::mutex lpips_mu;
     std::atomic<bool> lpips_ok{lpips != nullptr};
 
-    // Per worker: a GT + a render + the colour-corrected copy (3 x H*W*C
-    // floats) plus SSIM's eleven H*W double buffers. ~725 MB at 4K, so the
-    // pool is capped by a memory budget as well as by cores -- an eval run
-    // must not be the thing that OOMs the machine.
+    // Bound simultaneous RGB buffers and SSIM scratch so eval fits host RAM.
     const int64_t view_pixels = eds.widths.empty()
         ? (int64_t)1 << 20
         : (int64_t)eds.widths[0] * eds.heights[0];
-    const int64_t bytes_per_view = view_pixels * (3 * 3 * 4 + 11 * 8);
+    const int64_t bytes_per_view = view_pixels * (5 * 3 * 4 + 12 * 8 + 1);
     const int64_t kBudget = (int64_t)4 << 30;
     int n_workers = (int)std::max(1u, spirula::hardware_threads() / 4u);
     n_workers = (int)std::min<int64_t>(n_workers,
@@ -2166,6 +2176,17 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
         s.cc_l1   = image_l1(g, cc.data(), view_px);
         s.cc_psnr = image_psnr(g, cc.data(), view_px);
         s.cc_ssim = image_ssim(g, cc.data(), j.H, j.W, j.C);
+        if (!j.mask.empty()) {
+            const uint8_t* m = j.mask.data();
+            color_correct_into(j.pred.data(), g, (int64_t)j.H * j.W, j.C, cc,
+                               5, 0.5f / 255.0f, m);
+            s.masked = {image_l1(g, j.pred.data(), view_px, m, j.C),
+                image_psnr(g, j.pred.data(), view_px, m, j.C),
+                image_ssim(g, j.pred.data(), j.H, j.W, j.C, m),
+                image_l1(g, cc.data(), view_px, m, j.C),
+                image_psnr(g, cc.data(), view_px, m, j.C),
+                image_ssim(g, cc.data(), j.H, j.W, j.C, m)};
+        }
         if (lpips_ok.load()) {
             // On the 8-bit images, as eval_lpips.py and 3DGS's metrics.py score
             // them: bonsai's float renders averaged 1.8% (alex) / 0.9% (vgg)
@@ -2175,11 +2196,25 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
             color_correct_into(j.pred.data(), g, (int64_t)j.H * j.W, j.C, cc);
             try {
                 if (j.C != 3) throw std::runtime_error("LPIPS needs RGB views");
+                std::vector<const float*> predictions{j.pred.data(),cc.data()};
+                thread_local std::vector<float> valid_pred, valid_cc;
+                if (!j.mask.empty()) {
+                    valid_pred = j.pred;
+                    color_correct_into(j.pred.data(),g,(int64_t)j.H*j.W,j.C,valid_cc,
+                                       5,0.5f/255.0f,j.mask.data());
+                    for (size_t p = 0; p < valid_pred.size(); ++p)
+                        if (!j.mask[p/j.C]) valid_pred[p] = valid_cc[p] = g[p];
+                    predictions.push_back(valid_pred.data());
+                    predictions.push_back(valid_cc.data());
+                }
                 std::lock_guard<std::mutex> lk(lpips_mu);
-                for (const std::vector<float>& m :
-                     lpips->score(g, {j.pred.data(), cc.data()}, j.W, j.H)) {
+                for (const std::vector<float>& m : lpips->score(g,predictions,j.W,j.H)) {
                     s.lpips.push_back(m[0]);
                     s.cc_lpips.push_back(m[1]);
+                    if (!j.mask.empty()) {
+                        s.masked_lpips.push_back(m[2]);
+                        s.masked_cc_lpips.push_back(m[3]);
+                    }
                 }
             } catch (const std::exception& e) {
                 if (lpips_ok.exchange(false))
@@ -2206,6 +2241,12 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
             // from the files alone (reference/python/eval_lpips.py).
             png("gt", j.gt);
             png("render", j.pred);
+            if (!j.mask.empty()) {
+                std::vector<float> mask_rgb(j.mask.size() * j.C);
+                for (size_t i = 0; i < mask_rgb.size(); ++i)
+                    mask_rgb[i] = j.mask[i / j.C] ? 1.0f : 0.0f;
+                png("mask", mask_rgb);
+            }
         }
         report_progress();
     };
@@ -2251,9 +2292,10 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
         if (stop_requested.load() || worker_failed.load()) break;
         int64_t H = 0, W = 0, B = 0, Cc = 0;
         std::vector<float> gt, render;
+        std::vector<uint8_t> mask;
         {
             std::lock_guard<std::mutex> lk(engine_mutex);
-            int n_view = engine_eval_forward(cfg.primitive, sh_deg, cfg.packed);
+            int n_view = engine_eval_forward((int)i, cfg.primitive, sh_deg, cfg.packed);
             if (n_view == 0) break;
             auto shape = engine_get_render_rgb_shape();
             B = std::get<0>(shape); H = std::get<1>(shape);
@@ -2267,6 +2309,23 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
                 TorchTensorView{0, 0, {}}, TorchTensorView{0, 0, {}});
             engine_copy_gt_rgb_to_host(
                 TorchTensorView{(uint64_t)(uintptr_t)gt.data(), 4, {B, H, W, Cc}});
+            if (!cfg.apply_loss_for_mask.value_or(false)) {
+                auto ms = engine_get_gt_alpha_shape();
+                const int64_t mh = std::get<1>(ms), mw = std::get<2>(ms);
+                if (std::get<0>(ms) == B && mh > 0 && mw > 0) {
+                    std::vector<uint8_t> source((size_t)(B * mh * mw));
+                    engine_copy_gt_alpha_to_host(TorchTensorView{
+                        (uint64_t)(uintptr_t)source.data(), 1, {B, mh, mw, 1}});
+                    mask.resize((size_t)(B * H * W));
+                    for (int64_t b = 0; b < B; ++b)
+                        for (int64_t y = 0; y < H; ++y)
+                            for (int64_t x = 0; x < W; ++x) {
+                                int64_t sy = std::min((int64_t)((y + 0.5) * mh / H), mh - 1);
+                                int64_t sx = std::min((int64_t)((x + 0.5) * mw / W), mw - 1);
+                                mask[(b*H+y)*W+x] = source[(b*mh+sy)*mw+sx];
+                            }
+                }
+            }
         }
 
         // Per POST-split view inside the batch (K faces of one input image).
@@ -2279,6 +2338,12 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
                           gt.begin() + (size_t)((v + 1) * view_px));
             job.pred.assign(render.begin() + (size_t)(v * view_px),
                             render.begin() + (size_t)((v + 1) * view_px));
+            if (!mask.empty()) {
+                job.mask.assign(mask.begin() + (size_t)(v * H * W),
+                                mask.begin() + (size_t)((v + 1) * H * W));
+                if (std::none_of(job.mask.begin(), job.mask.end(), [](uint8_t x) { return x != 0; }))
+                    continue;
+            }
             for (float& x : job.pred) x = std::min(std::max(x, 0.0f), 1.0f);
             {
                 std::unique_lock<std::mutex> lk(qmu);
@@ -2318,9 +2383,17 @@ void TrainerSession::eval(const std::function<void(const EvalProgress&)>& on_pro
         per_image["cc_l1"].push_back(s.cc_l1);
         per_image["cc_psnr"].push_back(s.cc_psnr);
         per_image["cc_ssim"].push_back(s.cc_ssim);
+        constexpr const char* masked_keys[] = {"masked_l1", "masked_psnr", "masked_ssim",
+            "masked_cc_l1", "masked_cc_psnr", "masked_cc_ssim"};
+        for (size_t m = 0; m < s.masked.size(); ++m)
+            per_image[masked_keys[m]].push_back(s.masked[m]);
         for (size_t m = 0; with_lpips && m < lpips_names.size(); ++m) {
             per_image[lpips_names[m]].push_back(s.lpips[m]);
             per_image["cc_" + lpips_names[m]].push_back(s.cc_lpips[m]);
+            if (!s.masked_lpips.empty()) {
+                per_image["masked_" + lpips_names[m]].push_back(s.masked_lpips[m]);
+                per_image["masked_cc_" + lpips_names[m]].push_back(s.masked_cc_lpips[m]);
+            }
         }
     }
 

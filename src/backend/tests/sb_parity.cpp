@@ -476,7 +476,7 @@ static void run(ColorBasis basis, bool eval3d, const char* cam) {
            "NONE", ttv(d.dist, {C, kCameraDistortionParams}),
            DeviceVector<int32_t>{}, DeviceVector<int32_t>{}, f.aabb_dev, zw,
            v_screen, g1, g2, std::nullopt, std::nullopt, std::nullopt,
-           std::nullopt, NonShQuantState{}, SplatVisitState{},
+           std::nullopt, NonShQuantState{}, SplatVisitState{}, {},
            DeviceVector<float>(ttv(radii, {N, 1})), DeviceVector<float>{},
            1e-4f, 1e-3f, 5e-3f, 5e-2f, 2.5e-3f, 1e-4f, 2.5e-3f,
            /*max_gauss_ratio=*/10.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f,

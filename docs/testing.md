@@ -35,6 +35,23 @@ all-zero reference depth must give zero depth loss and gradients, while valid
 depth must retain finite supervision. It covers masks, multiple scales and
 3-million-pixel frames.
 
+`projective_depth_test` checks anchor projection invariance, depth descent,
+bearing information, and packed observation indexing; it also supports the
+dump/compare workflow below. `fpbo_parity` and `fpbo_split_parity` exercise
+projective updates with compressed and full-precision optimizer state.
+`noise_moments` checks zero mean, covariance, and temporal independence for
+identical Gaussians in both exploration kernels.
+`projective_camera_batches` checks host/device camera maps, coincident virtual
+views, geometry-supervision fallback, and reset.
+`projective_memory` checks lazy camera/state allocation, zero disabled GPU
+capacity, release on disable, and enabled/disabled checkpoint restoration.
+`projective_resume` checks that full checkpoints retain their anchors, moments,
+and information. `eval_views_once` checks exact indexed traversal with CPU and
+disk caches, and `masked_eval_metrics` checks valid-pixel normalization, SSIM
+support, and masked color fitting. See
+[projective depth optimization](notes/projective-depth.md) for the update and
+evaluation definitions.
+
 **The same source builds under both backends.** Each file only touches
 `backend::`, the generated launch declarations, and `Tensor.h`. The workflow
 is dump-then-compare:
